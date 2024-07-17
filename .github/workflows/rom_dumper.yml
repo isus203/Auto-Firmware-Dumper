@@ -261,10 +261,10 @@ jobs:
       if: |
         env.GVT == 'true'
       run: |
-        cd /home/Auto-Dumper
+        #cd /home/Auto-Dumper
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
-        cd vnd_project/android/vendor/"$brand"/"$codename"
+        #cd vnd_project/android/vendor/"$brand"/"$codename"
         sudo chmod -R 777 *
         dat=$(date +%Y%m%d)
         git init
