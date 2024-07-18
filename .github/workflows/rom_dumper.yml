@@ -266,7 +266,11 @@ jobs:
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         cd vnd_project/android
-        cd vendor/"$brand"/"$codename"
+        cd vendor
+        ls
+        cd "$brand"
+        ls
+        cd "$codename"
         sudo chmod -R 777 *
         dat=$(date +%Y%m%d)
         git init
