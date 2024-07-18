@@ -238,6 +238,7 @@ jobs:
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         cd vnd_project
+        ls
         echo "Controlling LineageOS device tree..."
         if [ -d android/device/"$brand"/"$codename" ]; then
            echo "Device tree found"
@@ -262,9 +263,11 @@ jobs:
         env.GVT == 'true'
       run: |
         cd /home/Auto-Dumper
+        cd vnd_project/android
+        ls
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
-        cd /vnd_project/android/vendor/"$brand"/"$codename"
+        cd vendor/"$brand"/"$codename"
         sudo chmod -R 777 *
         dat=$(date +%Y%m%d)
         git init
