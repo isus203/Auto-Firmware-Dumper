@@ -270,9 +270,7 @@ jobs:
         if [ -d "$codename" ]; then
         cd "$codename"
         else
-        cd FULL-64
-        else
-        cd FULL-64-*
+        cd FULL-64*
         fi
         sudo chmod -R 777 *
         dat=$(date +%Y%m%d)
