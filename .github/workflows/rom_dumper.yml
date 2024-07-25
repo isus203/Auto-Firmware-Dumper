@@ -265,7 +265,7 @@ jobs:
         cd /home/Auto-Dumper
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
-        cd vnd_project/android/vendor"$brand"
+        cd vnd_project/android/vendor/"$brand"
         ls
         if [ -d "$codename" ]; then
         cd "$codename"
