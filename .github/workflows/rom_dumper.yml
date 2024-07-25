@@ -265,8 +265,13 @@ jobs:
         cd /home/Auto-Dumper
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
-        cd vnd_project/android
-        cd vendor/"$brand"/FULL-64
+        cd vnd_project/android/vendor"$brand"
+        ls
+        if [ -d "$codename" ]; then
+        cd "$codename"
+        else
+        cd FULL-64
+        fi
         sudo chmod -R 777 *
         dat=$(date +%Y%m%d)
         git init
