@@ -17,12 +17,12 @@ on:
         default: ''
       GENERATE_VENDOR:
         description: 'Create Vendor Tree'
-        required: false
+        required: true
         default: 'true'
         type: boolean
       UPLOAD_LINEAGE_DT:
         description: 'Upload LineageOS tree'
-        required: false
+        required: true
         default: 'true'
         type: boolean
       UPLOAD_TWRP_DT:
