@@ -208,7 +208,6 @@ jobs:
         fi
         find /home/Auto-Dumper/DumprX/out -type f -size +50M -delete -exec echo "Deleted: "{} \;
         dat=$(date +%Y%m%d)
-        gh auth login
         git init
         git branch -M dump-"$codename"-"$dat"
         git add .
