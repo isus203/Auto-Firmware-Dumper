@@ -62,7 +62,7 @@ jobs:
       run: |
         sudo apt update
         sudo apt -y upgrade
-        sudo apt -y install cpio aria2 git python3 neofetch tar gzip
+        sudo apt -y install cpio aria2 git python3 neofetch tar gzip gh
 
     - name: Setup GithubCLI
       run: |
