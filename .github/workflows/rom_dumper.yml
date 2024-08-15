@@ -93,7 +93,7 @@ jobs:
 
     - name: Setting up Git
       run: |
-        gh auth login --with-token "${{ secrets.GTOKEN }}"
+        gh auth login --with-token ${{ secrets.GTOKEN }}
 
     - name: Uploading ROM Dump
       run: |
