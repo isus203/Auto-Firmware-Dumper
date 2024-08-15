@@ -93,8 +93,7 @@ jobs:
 
     - name: Setting up Git
       run: |
-        git config --global user.name "${{ env.UN }}"
-        git config --global user.email "${{ env.UEM }}"
+        gh auth login --with-token "${{ secrets.GTOKEN }}"
 
     - name: Uploading ROM Dump
       run: |
