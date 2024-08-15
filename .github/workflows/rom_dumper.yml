@@ -93,8 +93,9 @@ jobs:
 
     - name: Setting up Git
       run: |
-        gh auth login --with-token ${{ secrets.GTOKEN }}
-
+        git config --global user.name "${{ env.UN }}"
+        git config --global user.email "${{ env.UEM }}"
+        
     - name: Uploading ROM Dump
       run: |
         cd /home/Auto-Dumper/DumprX/out
