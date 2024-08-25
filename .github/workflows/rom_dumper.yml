@@ -187,6 +187,7 @@ jobs:
         git branch -M dump-"$codename"-"$dat"
         git add .
         git commit -s -m "Dump for $brand $codename"
+        git remote -v
         gh repo create dump_"$brand"_"$codename" --public --description="Dump for $brand $codename " --source=. --remote=origin --push
         cd /home/Auto-Dumper
         mkdir -p vnd_project/android/device/"$brand"/"$codename"
@@ -246,6 +247,7 @@ jobs:
         git branch -M vendor-"$codename"-"$dat"
         git add .
         git commit -s -m "$codename : initial vendor tree"
+        git remote -v
         gh repo create android_vendor_"$brand"_"$codename" --public --description="Vendor tree for $codename" --source=. --remote=origin --push
         echo "Succesfull"
         cd /home/Auto-Dumper
@@ -265,6 +267,7 @@ jobs:
         git branch -M lineage-"$codename"-"$dat"
         git add .
         git commit -s -m "$codename : LineageOS compatible device tree"
+        git remote -v
         gh repo create lineage_device_"$brand"_"$codename" --public --description="LineageOS compatible tree for $codename " --source=. --remote=origin --push
       continue-on-error: true
 
@@ -283,6 +286,7 @@ jobs:
         git branch -M twrp-"$version"-"$dat"
         git add .
         git commit -s -m "$codename : TWRP compatible device tree"
+        git remote -v
         gh repo create twrp_device_"$brand"_"$codename" --public --description="TWRP compatible tree for $codename " --source=. --remote=origin --push
       continue-on-error: true
 
