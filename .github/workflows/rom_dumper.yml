@@ -186,7 +186,7 @@ jobs:
         git init
         git branch -M dump-"$codename"-"$dat"
         git add .
-        git commit -s -m "Dump for $brand $codename"
+        git push origin "Dump for $brand $codename":master
         git remote -v
         gh repo create dump_"$brand"_"$codename" --public --description="Dump for $brand $codename " --source=. --remote=origin --push
         cd /home/Auto-Dumper
