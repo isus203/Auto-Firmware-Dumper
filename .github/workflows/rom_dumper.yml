@@ -199,6 +199,7 @@ jobs:
            echo "LINEAGEOS DEVİCE TREE NOT FOUND!"
            echo "IF REQUESTED, VENDOR TREE WILL NOT BE CREATED"
         fi
+        mkdir -p /home/Auto-Dumper/vnd_project/dump
         mv /home/Auto-Dumper/DumprX/out/* /home/Auto-Dumper/vnd_project/dump/
 
     - name: Create vendor tree
