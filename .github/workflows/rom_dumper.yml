@@ -90,7 +90,6 @@ jobs:
       run: |
         git config --global user.name "${{ env.UN }}"
         git config --global user.email "${{ env.UEM }}"
-        git config --global http.postBuffer 924988000
         git config --global http.lowSpeedLimit 0
         git config --global http.lowSpeedTime 999999
         unset GITHUB_TOKEN
