@@ -89,7 +89,7 @@ jobs:
     - name: Setting up Git
       run: |
         git config --global user.name "${{ env.UN }}"
-        git config --global user.email "${{ env.UEM }}"
+        git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
         git config --global http.postBuffer 924288909
         git config --global http.lowSpeedLimit 0
         git config --global http.lowSpeedTime 999999
