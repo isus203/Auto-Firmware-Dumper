@@ -90,8 +90,10 @@ jobs:
       run: |
         git config --global user.name "${{ env.UN }}"
         git config --global user.email "${{ env.UEM }}"
+        git config --global http.postBuffer 924288909
         git config --global http.lowSpeedLimit 0
         git config --global http.lowSpeedTime 999999
+        git lfs install
         unset GITHUB_TOKEN
         gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
 
@@ -185,6 +187,10 @@ jobs:
         find /home/Auto-Dumper/DumprX/out -type f -size +50M -delete -exec echo "Deleted: "{} \;
         dat=$(date +%Y%m%d)
         git init
+        git lfs track "*.bin"
+        git add .gitattributes
+        git commit -m "Track binary files with Git LFS"
+        git push origin main
         git branch -M dump-"$codename"-"$dat"
         git add .
         git commit -s -m "Dump for $brand $codename"
