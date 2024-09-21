@@ -57,7 +57,8 @@ jobs:
       run: |
         sudo apt update \
         && sudo apt -y upgrade \
-        && sudo apt -y install cpio aria2 git python3 neofetch tar gzip
+        && sudo apt -y install cpio aria2 git python3 neofetch tar gzip \
+        && sudo apt install -y unace unrar zip unzip p7zip-full p7zip-rar sharutils rar uudeview mpack arj cabextract device-tree-compiler liblzma-dev python3-pip brotli liblz4-tool axel gawk aria2 detox cpio rename liblz4-dev jq git-lfs
 
     - name: Setup GithubCLI
       run: |
