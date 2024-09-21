@@ -49,8 +49,7 @@ jobs:
 
     - name: Increase the size of the workspace
       run: |
-        root-reserve-mb: 512
-        swap-size-mb: 1024
+        swap-size-gb: 254
       
     - name: Update Packages
       run: |
