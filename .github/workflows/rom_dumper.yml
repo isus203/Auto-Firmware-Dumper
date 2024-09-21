@@ -63,6 +63,12 @@ jobs:
         && sudo apt update \
         && sudo apt install gh -y
 
+    - name: Installing Python Components
+      run: |
+        pip3 install backports.lzma extract-dtb protobuf==3.20.0 pycryptodome docopt zstandard twrpdtgen future requests humanize clint lz4 pycryptodome pycryptodomex
+        pip3 install git+https://github.com/sebaubuntu-python/aospdtgen
+        pip3 install twrpdtgen
+        
     - name: Clone and Setup DumprX
       run: |
         cd /home
@@ -72,8 +78,6 @@ jobs:
         cd DumprX
         sudo chmod 777 *.sh
         bash setup.sh
-        pip3 install aospdtgen
-        pip3 install twrpdtgen
 
     - name: Setting up Git
       run: |
