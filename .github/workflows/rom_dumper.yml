@@ -25,20 +25,14 @@ on:
         required: true
         default: 'true'
         type: boolean
-      UPLOAD_TWRP_DT:
-        description: 'Upload TWRP tree'
-        required: true
-        default: 'false'
-        type: boolean
 
 jobs:
   dump:
     name: Auto Firmware Dumper
     if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     env:
       GITHUB_TOKEN: ${{ secrets.GTOKEN }}
-      TWT: ${{ github.event.inputs.UPLOAD_TWRP_DT }}
       LOT: ${{ github.event.inputs.UPLOAD_LINEAGE_DT }}
       GVT: ${{ github.event.inputs.GENERATE_VENDOR }}
       FUR: ${{ github.event.inputs.FIRMWARE_URL }}
@@ -285,25 +279,6 @@ jobs:
         git commit -s -m "$codename : LineageOS compatible device tree"
         git remote -v
         gh repo create lineage_device_"$brand"_"$codename" --public --description="LineageOS compatible tree for $codename " --source=. --remote=origin --push
-      continue-on-error: true
-
-    - name: Uploading TWRP Device Tree
-      if: |
-        env.TWT == 'true'
-      run: |
-        cd /home/Auto-Dumper
-        codename=$(cat codename.txt)
-        brand=$(cat brand.txt)
-        version=$(cat version.txt)
-        cd twrp-device-tree/$brand/$codename
-        dat=$(date +%Y%m%d)
-        [ ! -f BoardConfig.mk ] && cd "$brand"/"$codename"
-        git init
-        git branch -M twrp-"$version"-"$dat"
-        git add .
-        git commit -s -m "$codename : TWRP compatible device tree"
-        git remote -v
-        gh repo create twrp_device_"$brand"_"$codename" --public --description="TWRP compatible tree for $codename " --source=. --remote=origin --push
       continue-on-error: true
 
     - name: Uploading preview of images
