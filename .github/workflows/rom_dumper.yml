@@ -80,12 +80,6 @@ jobs:
         pip3 install aospdtgen
         pip3 install twrpdtgen
 
-    - name: Creating Dump
-      run: |
-        cd /home/Auto-Dumper/DumprX
-        sudo bash dumper.sh "${{ env.FUR }}"
-        sudo chmod -R 777 out
-
     - name: Setting up Git
       run: |
         git config --global user.name "${{ env.UN }}"
@@ -96,6 +90,12 @@ jobs:
         git lfs install
         unset GITHUB_TOKEN
         gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
+
+    - name: Creating Dump
+      run: |
+        cd /home/Auto-Dumper/DumprX
+        sudo bash dumper.sh "${{ env.FUR }}"
+        sudo chmod -R 777 out
 
     - name: Uploading ROM Dump
       run: |
@@ -208,6 +208,7 @@ jobs:
         fi
         mkdir -p /home/Auto-Dumper/vnd_project/dump
         mv /home/Auto-Dumper/DumprX/out/* /home/Auto-Dumper/vnd_project/dump/
+      continue-on-error: true
 
     - name: Create vendor tree
       if: |
@@ -261,6 +262,7 @@ jobs:
         cd /home/Auto-Dumper
         sudo rm -rf DumprX
         sudo rm -rf vnd_project
+      continue-on-error: true
 
     - name: Uploading LineageOS Device Tree
       if: |
