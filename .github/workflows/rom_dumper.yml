@@ -46,10 +46,6 @@ jobs:
       
     - name: Cleanup
       uses: rokibhasansagar/slimhub_actions@main
-
-    - name: Increase the size of the workspace
-      run: |
-        swap-size-gb: 24
       
     - name: Update Packages
       run: |
