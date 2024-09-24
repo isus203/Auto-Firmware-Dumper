@@ -74,7 +74,7 @@ jobs:
         cd /home
         sudo mkdir mode=777 Auto-Dumper
         cd Auto-Dumper
-        git clone https://github.com/Van-Firmware-Dumps/DumprX
+        git clone https://github.com/DroidDumps/phoenix_firmware_dumper DumprX/
         cd DumprX
         sudo chmod 777 *.sh
         bash setup.sh
