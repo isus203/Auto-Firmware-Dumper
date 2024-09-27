@@ -74,7 +74,7 @@ jobs:
         cd /home
         sudo mkdir mode=777 Auto-Dumper
         cd Auto-Dumper
-        git clone https://github.com/Van-Firmware-Dumps/DumprX
+        git clone https://github.com/DumprX/DumprX
         cd DumprX
         sudo chmod 777 *.sh
         bash setup.sh
@@ -93,7 +93,7 @@ jobs:
     - name: Creating Dump
       run: |
         cd /home/Auto-Dumper/DumprX
-        sudo bash dumper.sh "${{ env.FUR }}"
+        sudo bash dumper.sh ${{ env.FUR }}
         sudo chmod -R 777 out
 
     - name: Uploading ROM Dump
