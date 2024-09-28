@@ -186,9 +186,6 @@ jobs:
         find /home/Auto-Dumper/DumprX/out -type f -size +50M -delete -exec echo "Deleted: "{} \;
         dat=$(date +%Y%m%d)
         git init
-        git lfs track "*.bin"
-        git add .gitattributes
-        git commit -m "Track binary files with Git LFS"
         git push origin main
         git branch -M dump-"$codename"-"$dat"
         git add .
