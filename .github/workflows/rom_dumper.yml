@@ -194,9 +194,9 @@ jobs:
         find /home/Auto-Dumper/DumprX/out -type f -size +50M -delete -exec echo "Deleted: "{} \;
         dat=$(date +%Y%m%d)
         git init
-        git branch -M dump-"$codename"-"$dat"
         git add .
         git commit -s -m "Dump for $brand $codename"
+        git branch -M dump-"$codename"-"$dat"
         git config core.filemode false
         git remote -v
         git push origin dump-"$codename"-"$dat"
