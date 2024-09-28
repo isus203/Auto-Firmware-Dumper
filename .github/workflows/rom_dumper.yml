@@ -244,6 +244,7 @@ jobs:
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         cd vnd_project/android/vendor/"$brand"
+        mv /FULL-64*/* /"$codename"
         if [ -d "$codename" ]; then
         cd "$codename"
         else
