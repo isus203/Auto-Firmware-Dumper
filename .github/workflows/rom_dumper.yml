@@ -217,10 +217,10 @@ jobs:
       if: |
         env.GVT == 'true'
       run: |
-        codename=$(cat codename.txt)
-        brand=$(cat brand.txt)
         cd /home/Auto-Dumper
         ls -all
+        codename=$(cat codename.txt)
+        brand=$(cat brand.txt)
         cd vnd_project
         echo "Controlling LineageOS device tree..."
         if [ -d android/device/"$brand"/"$codename" ]; then
@@ -240,7 +240,7 @@ jobs:
         bash extract-files.sh /home/Auto-Dumper/vnd_project/dump/
         echo "Done extracting and making files."
         echo "Pushing as repository now."
-
+      continue-on-error: true
     - name: Uploading Vendor Tree
       if: |
         env.GVT == 'true'
