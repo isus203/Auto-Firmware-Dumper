@@ -197,6 +197,7 @@ jobs:
         git branch -M dump-"$codename"-"$dat"
         git add .
         git commit -s -m "Dump for $brand $codename"
+        git config core.filemode false
         git remote -v
         gh repo create dump_"$brand"_"$codename" --public --description="Dump for $brand $codename " --source=. --remote=origin --push
         cd /home/Auto-Dumper
