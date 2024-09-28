@@ -199,7 +199,7 @@ jobs:
         git commit -s -m "Dump for $brand $codename"
         git config core.filemode false
         git remote -v
-        gh repo create dump_"$brand"_"$codename" --public --description="Dump for $brand $codename " --source=. --remote=origin --push
+        git push origin dump-"$codename"-"$dat"
         cd /home/Auto-Dumper
         mkdir -p vnd_project/android/device/"$brand"/"$codename"
         cd DumprX/out
@@ -212,7 +212,6 @@ jobs:
         fi
         mkdir -p /home/Auto-Dumper/vnd_project/dump
         mv /home/Auto-Dumper/DumprX/out/* /home/Auto-Dumper/vnd_project/dump/
-      continue-on-error: true
 
     - name: Create vendor tree
       if: |
@@ -250,7 +249,7 @@ jobs:
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         cd vnd_project/android/vendor/"$brand"
-        mv /FULL-64*/* /"$codename"
+        ls -all
         if [ -d "$codename" ]; then
         cd "$codename"
         else
