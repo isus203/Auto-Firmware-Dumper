@@ -199,7 +199,7 @@ jobs:
         git branch -M dump-"$codename"-"$dat"
         git config core.filemode false
         git remote -v
-        git push origin dump-"$codename"-"$dat"
+        gh repo create dump_"$brand"_"$codename" --public --description="Dump for $brand $codename " --source=. --remote=origin --push
         cd /home/Auto-Dumper
         mkdir -p vnd_project/android/device/"$brand"/"$codename"
         cd DumprX/out
@@ -241,6 +241,7 @@ jobs:
         echo "Done extracting and making files."
         echo "Pushing as repository now."
       continue-on-error: true
+      
     - name: Uploading Vendor Tree
       if: |
         env.GVT == 'true'
