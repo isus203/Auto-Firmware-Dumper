@@ -185,7 +185,6 @@ jobs:
         find /home/Auto-Dumper/DumprX/out -type f -size +50M -delete -exec echo "Deleted: "{} \;
         dat=$(date +%Y%m%d)
         git init
-        git push origin main
         git branch -M dump-"$codename"-"$dat"
         git add .
         git commit -s -m "Dump for $brand $codename"
@@ -209,9 +208,10 @@ jobs:
       if: |
         env.GVT == 'true'
       run: |
-        cd /home/Auto-Dumper
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
+        cd /home/Auto-Dumper
+        ls -all
         cd vnd_project
         echo "Controlling LineageOS device tree..."
         if [ -d android/device/"$brand"/"$codename" ]; then
