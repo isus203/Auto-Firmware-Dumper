@@ -74,7 +74,7 @@ jobs:
         cd /home
         sudo mkdir mode=777 Auto-Dumper
         cd Auto-Dumper
-        git clone https://github.com/Van-Firmware-Dumps/DumprX
+        git clone https://github.com/DumprX/DumprX
         cd DumprX
         sudo chmod 777 *.sh
         bash setup.sh
@@ -86,7 +86,6 @@ jobs:
         git config --global http.postBuffer 924288909
         git config --global http.lowSpeedLimit 0
         git config --global http.lowSpeedTime 999999
-        git lfs install
         unset GITHUB_TOKEN
         gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
 
