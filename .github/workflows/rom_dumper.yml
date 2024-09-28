@@ -15,6 +15,15 @@ on:
         description: 'Stock ROM Link'
         required: true
         default: ''
+      PROJECT:
+        description: 'Selecting a lineage for vendor generation:'
+        required: true
+        default: 'LineageOS 21.0'
+        type: choice
+        options:
+          - 'LineageOS 20.0'
+          - 'LineageOS 21.0'
+          - 'LineageOS 22.0'
       GENERATE_VENDOR:
         description: 'Create Vendor Tree'
         required: true
@@ -221,9 +230,9 @@ jobs:
            exit 1
         fi
         echo "Clonning LineageOS tools..."
-        git clone --depth=1 https://github.com/LineageOS/android_tools_extract-utils -b lineage-20.0 ./android/tools/extract-utils
+        git clone --depth=1 https://github.com/LineageOS/android_tools_extract-utils -b ${{ github.event.inputs.PROJECT }} ./android/tools/extract-utils
         echo "Done cloning extract-utils."
-        git clone --depth=1  https://github.com/LineageOS/android_prebuilts_extract-tools -b lineage-20.0 ./android/prebuilts/extract-tools
+        git clone --depth=1  https://github.com/LineageOS/android_prebuilts_extract-tools -b ${{ github.event.inputs.PROJECT }} ./android/prebuilts/extract-tools
         echo "Done cloning extract-tools."
         sudo chmod 777 android/device/"$brand"/"$codename"/setup-makefiles.sh
         cd android/device/"$brand"/"$codename"
