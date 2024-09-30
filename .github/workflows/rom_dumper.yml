@@ -1,4 +1,4 @@
-8name: Auto Firmware Dumper
+name: Auto Firmware Dumper
 
 on:
   workflow_dispatch:
