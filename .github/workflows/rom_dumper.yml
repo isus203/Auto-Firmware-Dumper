@@ -1,4 +1,4 @@
-name: Auto Firmware Dumper
+8name: Auto Firmware Dumper
 
 on:
   workflow_dispatch:
@@ -100,7 +100,7 @@ jobs:
       run: |
         git config --global user.name "${{ env.UN }}"
         git config --global user.email "${{ env.UEM }}"
-        git config --global http.postBuffer 692428890
+        git config --global http.postBuffer 999999999
         unset GITHUB_TOKEN
         gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
 
