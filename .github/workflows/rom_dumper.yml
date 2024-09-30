@@ -15,6 +15,14 @@ on:
         description: 'Stock ROM Link'
         required: true
         default: ''
+      VENDOR_NAME:
+        description: 'Device manufacturer '
+        required: true
+        default: ''
+      DEVICE_NAME:
+        description: 'Device code name '
+        required: true
+        default: ''
       PROJECT:
         description: 'Selecting a lineage for vendor generation:'
         required: true
@@ -135,32 +143,11 @@ jobs:
            cd system
            [ -d system ] && cd system
         fi
-        codename=$(grep "ro.product.vendor.device=" build.prop | cut -d'=' -f2)
-        brand=$(grep "ro.product.vendor.brand=" build.prop | cut -d'=' -f2)
-        if [ "$codename" == "" ]; then
-           unset codename
-           codename=$(grep "ro.vendor.product.device=" build.prop | cut -d'=' -f2)
-           if [ "$codename" == "" ]; then
-              unset codename
-              codename=$(grep "ro.product.device=" build.prop | cut -d'=' -f2)
-           fi
-        fi
-        if [ "$brand" == "" ]; then
-           unset brand
-           brand=$(grep "ro.vendor.product.brand=" build.prop | cut -d'=' -f2)
-           if [ "$brand" == "" ]; then
-              unset brand
-              brand=$(grep "ro.product.brand=" build.prop | cut -d'=' -f2)
-           fi
-        fi
-        new_brand=$(echo "$brand" | tr 'A-Z' 'a-z')
-        unset brand
-        brand=$new_brand
-        new_codename=$(echo "$codename")
-        codename=$(echo "$new_codename" | tr -d '[:space:]')
+        brand=${{ github.event.inputs.VENDOR_NAME }}
+        codename=${{ github.event.inputs.DEVICE_NAME }}
         cd /home/Auto-Dumper
-        echo "$codename" >> codename.txt
-        echo "$brand" >> brand.txt
+        echo "${{ github.event.inputs.DEVICE_NAME }}" >> codename.txt
+        echo "${{ github.event.inputs.VENDOR_NAME }}" >> brand.txt
         cd /home/Auto-Dumper/DumprX/out
         cd system
         if [ -d system ]; then
@@ -218,7 +205,6 @@ jobs:
         env.GVT == 'true'
       run: |
         cd /home/Auto-Dumper
-        ls -all
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         cd vnd_project
