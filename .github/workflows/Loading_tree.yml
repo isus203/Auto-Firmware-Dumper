@@ -1,4 +1,4 @@
-name: Auto Firmware Dumper
+name: Loading_tree
 
 on:
   workflow_dispatch:
