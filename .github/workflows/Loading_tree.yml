@@ -180,8 +180,6 @@ jobs:
         mv /home/Auto-Dumper/DumprX/out/* /home/Auto-Dumper/vnd_project/dump/
 
     - name: Create vendor tree
-      if: |
-        env.GVT == 'true'
       run: |
         cd /home/Auto-Dumper
         codename=$(cat codename.txt)
