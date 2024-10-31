@@ -1,4 +1,4 @@
-name: Loading_tree
+name: Generating and loading a tree 
 
 on:
   workflow_dispatch:
