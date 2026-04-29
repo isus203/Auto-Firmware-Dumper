@@ -66,6 +66,10 @@ jobs:
           git_auth "${{ env.UN }}" "${{ env.UEM }}" "${{ env.GITHUB_TOKEN }}"
         working-directory: ${{ github.workspace }}
 
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full recovery-tools python3-pip lz4
+        working-directory: ${{ github.workspace }}
+        
       - name: Create Dump
         run: |
           cd workdir/DumprX
