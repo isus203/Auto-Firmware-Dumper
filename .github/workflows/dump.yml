@@ -105,14 +105,14 @@ jobs:
   
     - name: Install firmware 
       run: |
-        ls
-        cd DumprX
+        cd ./home/Auto-Dumper/DumprX/out
+        ls 
         gdown "${{ env.FUR }}" -O firmware.zip
       working-directory: ${{ github.workspace }}
         
     - name: Create Dump
       run: |
-        cd DumprX
+        cd ./home/Auto-Dumper/DumprX/out
         bash dumper.sh ./firmware.zip
         sudo chown -R $USER:$USER out
         sudo chmod -R 755 out
