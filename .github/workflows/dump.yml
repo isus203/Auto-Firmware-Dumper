@@ -15,6 +15,14 @@ on:
         description: 'Stock ROM Link Google Drive '
         required: true
         default: ''
+      VENDOR_NAME:
+        description: 'Device manufacturer'
+        required: true
+        default: ''
+      CODE_NANE:
+        description: 'Code name '
+        required: true
+        default: ''
       GENERATE_VENDOR:
         description: 'Create Vendor Tree'
         required: true
@@ -42,6 +50,8 @@ jobs:
       LOT: ${{ github.event.inputs.UPLOAD_LINEAGE_DT }}
       GVT: ${{ github.event.inputs.GENERATE_VENDOR }}
       FUR: ${{ github.event.inputs.FIRMWARE_URL }}
+      VENDOR: ${{ github.event.inputs.VENDOR_NAME }}
+      CODE: ${{ github.event.inputs.CODE_NANE }}
       UN: ${{ github.event.inputs.USER_NAME }}
       UEM: ${{ github.event.inputs.USER_EMAIL }}
     permissions:
@@ -111,59 +121,9 @@ jobs:
       run: |
         cd /home/Auto-Dumper/DumprX/out
         sudo chmod -R 777 *
-        if [ -d system ]; then
-           echo " "
-        else
-           echo "Failed!";
-           cd /home/Auto-Dumper
-           sudo rm -rf DumprX
-           exit 1;
-        fi;
-        los_dir="lineage-device-tree"
-        if [ -d "$los_dir" ]; then
-           cp -r $los_dir /home/Auto-Dumper
-        else
-           echo "Lineage device tree not found!";
-        fi;
-        tw_dir="twrp-device-tree"
-        if [ -d "$tw_dir" ]; then
-           cp -r $tw_dir /home/Auto-Dumper
-        else
-           echo "TWRP device tree not found!";
-           unset tw_dir
-        fi;
-        if [ -d vendor ]; then
-           cd vendor
-        else
-           cd system
-           [ -d system ] && cd system
-        fi
-        codename=$(grep "ro.product.vendor.device=" build.prop | cut -d'=' -f2)
-        brand=$(grep "ro.product.vendor.brand=" build.prop | cut -d'=' -f2)
-        if [ "$codename" == "" ]; then
-           unset codename
-           codename=$(grep "ro.vendor.product.device=" build.prop | cut -d'=' -f2)
-           if [ "$codename" == "" ]; then
-              unset codename
-              codename=$(grep "ro.product.device=" build.prop | cut -d'=' -f2)
-           fi
-        fi
-        if [ "$brand" == "" ]; then
-           unset brand
-           brand=$(grep "ro.vendor.product.brand=" build.prop | cut -d'=' -f2)
-           if [ "$brand" == "" ]; then
-              unset brand
-              brand=$(grep "ro.product.brand=" build.prop | cut -d'=' -f2)
-           fi
-        fi
-        new_brand=$(echo "$brand" | tr 'A-Z' 'a-z')
-        unset brand
-        brand=$new_brand
-        new_codename=$(echo "$codename")
-        codename=$(echo "$new_codename" | tr -d '[:space:]')
         cd /home/Auto-Dumper
-        echo "$codename" >> codename.txt
-        echo "$brand" >> brand.txt
+        echo "${{ env.CODE }}" >> codename.txt
+        echo "${{ env.VENDOR }}" >> brand.txt
         cd /home/Auto-Dumper/DumprX/out
         cd system
         if [ -d system ]; then
