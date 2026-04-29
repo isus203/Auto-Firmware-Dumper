@@ -62,10 +62,12 @@ jobs:
 
       - name: Authorize Git And GitHub CLI
         run: |
-          . scripts/common_functions.sh
-          git_auth "${{ env.UN }}" "${{ env.UEM }}" "${{ env.GITHUB_TOKEN }}"
+          git config --global user.name "${{ env.UN }}"
+          git config --global user.email "${{ env.UEM }}"
+          unset GITHUB_TOKEN
+          gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
         working-directory: ${{ github.workspace }}
-
+        
       - name: Install dependencies
         run: |
          sudo apt-get update
@@ -84,7 +86,7 @@ jobs:
       - name: Create Dump
         run: |
           cd workdir/DumprX
-          sudo bash dumper.sh ./firmware.zip
+          bash dumper.sh ./firmware.zip
           sudo chown -R $USER:$USER out
           sudo chmod -R 755 out
         working-directory: ${{ github.workspace }}
