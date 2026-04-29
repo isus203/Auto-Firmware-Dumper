@@ -66,14 +66,15 @@ jobs:
     - name: Clone and Setup DumprX
       run: |
         sudo mkdir -p /home/Auto-Dumper
+        ls
         sudo chmod 777 /home/Auto-Dumper
         cd /home/Auto-Dumper
         git clone https://github.com/DumprX/DumprX
         cd DumprX
+        ls
         sudo chmod +x *.sh setup.sh
         bash setup.sh
         pip3 install aospdtgen twrpdtgen
-      working-directory: ${{ github.workspace }}
       
     - name: Install UV
       run: curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -84,6 +85,7 @@ jobs:
         sudo apt -y upgrade
         sudo apt -y install cpio aria2 git python3 neofetch tar gzip  p7zip-full python3-pip lz4 erofs-utils f2fs-tools libvixl-dev
         pip install gdown
+        ls
 
     - name: Setup GithubCLI
       run: |
@@ -93,9 +95,11 @@ jobs:
         && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
         && sudo apt update \
         && sudo apt install gh -y
+        ls
         
     - name: Authorize Git And GitHub CLI
       run: |
+        ls
         git config --global user.name "${{ env.UN }}"
         git config --global user.email "${{ env.UEM }}"
         unset GITHUB_TOKEN
@@ -104,6 +108,7 @@ jobs:
   
     - name: Install firmware 
       run: |
+        ls
         cd ./home/Auto-Dumper/DumprX
         ls 
         gdown "${{ env.FUR }}" -O firmware.zip
