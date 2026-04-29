@@ -57,11 +57,11 @@ jobs:
     permissions:
       contents: write
     steps:
-   # - uses: actions/checkout@v4
-  #  - uses: rokibhasansagar/slimhub_actions@main
-#    - uses: sersoft-gmbh/setup-gh-cli-action@v2
-    #  with:
-     #   version: stable
+    - uses: actions/checkout@v4
+    - uses: rokibhasansagar/slimhub_actions@main
+    - uses: sersoft-gmbh/setup-gh-cli-action@v2
+      with:
+        version: stable
           
     - name: Clone and Setup DumprX
       run: |
@@ -105,13 +105,14 @@ jobs:
   
     - name: Install firmware 
       run: |
-        cd home/Auto-Dumper/DumprX
+        ls
+        cd DumprX
         gdown "${{ env.FUR }}" -O firmware.zip
       working-directory: ${{ github.workspace }}
         
     - name: Create Dump
       run: |
-        cd home/Auto-Dumper/DumprX
+        cd DumprX
         bash dumper.sh ./firmware.zip
         sudo chown -R $USER:$USER out
         sudo chmod -R 755 out
