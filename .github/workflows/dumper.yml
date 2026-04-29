@@ -67,12 +67,15 @@ jobs:
         working-directory: ${{ github.workspace }}
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full python3-pip lz4
+        run: 
+          sudo apt-get update && sudo apt-get install -y p7zip-full python3-pip lz4
+          pip install gdown
         working-directory: ${{ github.workspace }}
         
       - name: Create Dump
         run: |
           cd workdir/DumprX
+          gdown "${{ env.FUR }}"
           sudo bash dumper.sh "${{ env.FUR }}"
           sudo chown -R $USER:$USER out
           sudo chmod -R 755 out
