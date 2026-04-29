@@ -67,7 +67,7 @@ jobs:
         working-directory: ${{ github.workspace }}
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full recovery-tools python3-pip lz4
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full python3-pip lz4
         working-directory: ${{ github.workspace }}
         
       - name: Create Dump
