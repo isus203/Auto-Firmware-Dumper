@@ -12,7 +12,7 @@ on:
         required: true
         default: 'yagizzengin73@gmail.com'
       FIRMWARE_URL:
-        description: 'Stock ROM Link'
+        description: 'Stock ROM Link Google Drive '
         required: true
         default: ''
       GENERATE_VENDOR:
@@ -68,8 +68,7 @@ jobs:
 
       - name: Install dependencies
         run: 
-          sudo apt-get update && sudo apt-get install -y p7zip-full python3-pip lz4
-          pip install gdown
+          sudo apt-get update && sudo apt-get install -y p7zip-full python3-pip lz4 && pip install gdown
         working-directory: ${{ github.workspace }}
         
       - name: Create Dump
