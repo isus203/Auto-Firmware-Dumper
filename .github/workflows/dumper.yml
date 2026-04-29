@@ -70,12 +70,17 @@ jobs:
         run: 
           sudo apt-get update && sudo apt-get install -y p7zip-full python3-pip lz4 && pip install gdown
         working-directory: ${{ github.workspace }}
+
+      - name: Install firmware 
+        run: |
+          cd workdir/DumprX
+          gdown "${{ env.FUR }}" -O firmware.zip
+        working-directory: ${{ github.workspace }}
         
       - name: Create Dump
         run: |
           cd workdir/DumprX
-          gdown "${{ env.FUR }}" -O firmware.zip
-          sudo bash dumper.sh firmware.zip
+          sudo bash dumper.sh ./firmware.zip
           sudo chown -R $USER:$USER out
           sudo chmod -R 755 out
         working-directory: ${{ github.workspace }}
