@@ -40,8 +40,8 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GTOKEN }} # Обязательно добавьте этот секрет в настройки репозитория
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+     # - name: Checkout Repository
+      #  uses: actions/checkout@v4
 
       - name: Cleanup and System Setup
         run: |
@@ -67,8 +67,13 @@ jobs:
 
       - name: Configure Git and Auth
         run: |
+          # Настройка данных пользователя
           git config --global user.name "${{ github.event.inputs.USER_NAME }}"
           git config --global user.email "${{ github.event.inputs.USER_EMAIL }}"
+          
+          # Очищаем переменную окружения GITHUB_TOKEN для этого шага, 
+          # чтобы gh auth login мог записать учетные данные в конфиг
+          unset GITHUB_TOKEN
           echo "${{ secrets.GTOKEN }}" | gh auth login --with-token
 
       - name: Download Firmware
