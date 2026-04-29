@@ -1,18 +1,18 @@
-name: Auto Firmware Dumper test
+name: Auto Firmware Dumper
 
 on:
   workflow_dispatch:
     inputs:
       USER_NAME:
-        description: 'Name in GitHub Account'
+        description: 'Name of your GitHub Account'
         required: true
-        default: ''
+        default: 'isus203'
       USER_EMAIL:
-        description: 'E-mail in GitHub Account'
+        description: 'E-mail of your GitHub Account'
         required: true
-        default: ''
+        default: 'yagizzengin73@gmail.com'
       FIRMWARE_URL:
-        description: 'Stock ROM Link'
+        description: 'Stock ROM Link Google Drive '
         required: true
         default: ''
       GENERATE_VENDOR:
@@ -47,27 +47,12 @@ jobs:
     permissions:
       contents: write
     steps:
-    - name: Check Out
-      uses: actions/checkout@v4
-      
-    - name: Cleanup
-      uses: rokibhasansagar/slimhub_actions@main
-        
-    - name: Update Packages
-      run: |
-        sudo apt update \
-        && sudo apt -y upgrade \
-        && sudo apt -y install cpio aria2 git python3 neofetch tar gzip
-
-    - name: Setup GithubCLI
-      run: |
-        type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
-        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-        && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-        && sudo apt update \
-        && sudo apt install gh -y
-
+    - uses: actions/checkout@v4
+    - uses: rokibhasansagar/slimhub_actions@main
+    - uses: sersoft-gmbh/setup-gh-cli-action@v2
+      with:
+        version: stable
+          
     - name: Clone and Setup DumprX
       run: |
         cd /home
@@ -79,19 +64,48 @@ jobs:
         bash setup.sh
         pip3 install aospdtgen
         pip3 install twrpdtgen
-
-    - name: Creating Dump
+      working-directory: ${{ github.workspace }}
+       
+    - name: Install UV
+      run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        
+    - name: Update Packages
       run: |
-        cd /home/Auto-Dumper/DumprX
-        sudo bash dumper.sh "${{ env.FUR }}"
-        sudo chmod -R 777 out
+        sudo apt update \
+        && sudo apt -y upgrade \
+        && sudo apt -y install cpio aria2 git python3 neofetch tar gzip  p7zip-full python3-pip lz4 erofs-utils f2fs-tools libvixl-dev
+        && pip install gdown
 
-    - name: Setting up Git
+    - name: Setup GithubCLI
+      run: |
+        type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+        && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+        && sudo apt update \
+        && sudo apt install gh -y
+        
+    - name: Authorize Git And GitHub CLI
       run: |
         git config --global user.name "${{ env.UN }}"
         git config --global user.email "${{ env.UEM }}"
         unset GITHUB_TOKEN
         gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
+      working-directory: ${{ github.workspace }}
+  
+    - name: Install firmware 
+      run: |
+        cd home/Auto-Dumper/DumprX
+        gdown "${{ env.FUR }}" -O firmware.zip
+      working-directory: ${{ github.workspace }}
+        
+    - name: Create Dump
+      run: |
+        cd home/Auto-Dumper/DumprX
+        bash dumper.sh ./firmware.zip
+        sudo chown -R $USER:$USER out
+        sudo chmod -R 755 out
+      working-directory: ${{ github.workspace }}
 
     - name: Uploading ROM Dump
       run: |
@@ -219,9 +233,9 @@ jobs:
            exit 1
         fi
         echo "Clonning LineageOS tools..."
-        git clone --depth=1 https://github.com/LineageOS/android_tools_extract-utils -b lineage-22.0 ./android/tools/extract-utils
+        git clone --depth=1 https://github.com/LineageOS/android_tools_extract-utils -b lineage-22.2 ./android/tools/extract-utils
         echo "Done cloning extract-utils."
-        git clone --depth=1  https://github.com/LineageOS/android_prebuilts_extract-tools -b lineage-22.0 ./android/prebuilts/extract-tools
+        git clone --depth=1  https://github.com/LineageOS/android_prebuilts_extract-tools -b lineage-22.2 ./android/prebuilts/extract-tools
         echo "Done cloning extract-tools."
         sudo chmod 777 android/device/"$brand"/"$codename"/setup-makefiles.sh
         cd android/device/"$brand"/"$codename"
