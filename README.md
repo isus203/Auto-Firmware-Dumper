@@ -2,7 +2,7 @@
 It allows you to create ROM dumps using GitHub actions. It uses [DumprX](https://github.com/DumprX/DumprX) when creating dumps.
 
 ## Requirements
-- ROM Link [mediafire | mega.nz | gdrive | AndroidFileHost OR Directly download link]
+- ROM Link [gdrive]
 - GitHub token (I will explain)
 - Patience
 
