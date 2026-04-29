@@ -6,7 +6,7 @@ on:
       USER_NAME:
         description: 'Name of your GitHub Account'
         required: true
-        default: 'YZBruh'
+        default: 'isus203'
       USER_EMAIL:
         description: 'E-mail of your GitHub Account'
         required: true
@@ -75,8 +75,8 @@ jobs:
       - name: Create Dump
         run: |
           cd workdir/DumprX
-          gdown "${{ env.FUR }}"
-          sudo bash dumper.sh "${{ env.FUR }}"
+          gdown "${{ env.FUR }}" -O firmware.zip
+          sudo bash dumper.sh firmware.zip
           sudo chown -R $USER:$USER out
           sudo chmod -R 755 out
         working-directory: ${{ github.workspace }}
