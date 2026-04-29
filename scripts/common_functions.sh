@@ -82,12 +82,3 @@ compress_files() {
 
   find "$1" -type f -size +50M -exec compress {} \;
 }
-
-git_auth() {
-  [ $# -lt 3 ] && error "Missing argument"
-  unset GITHUB_TOKEN
-  git config --global user.name "$1"
-  git config --global user.email "$2"
-  gh auth login --with-token <<< "$3"
-}
-
