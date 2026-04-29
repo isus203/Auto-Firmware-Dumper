@@ -57,9 +57,9 @@ jobs:
     permissions:
       contents: write
     steps:
-    - uses: actions/checkout@v4
-    - uses: rokibhasansagar/slimhub_actions@main
-    - uses: sersoft-gmbh/setup-gh-cli-action@v2
+   # - uses: actions/checkout@v4
+  #  - uses: rokibhasansagar/slimhub_actions@main
+#    - uses: sersoft-gmbh/setup-gh-cli-action@v2
       with:
         version: stable
           
@@ -81,10 +81,10 @@ jobs:
         
     - name: Update Packages
       run: |
-        sudo apt update \
-        && sudo apt -y upgrade \
-        && sudo apt -y install cpio aria2 git python3 neofetch tar gzip  p7zip-full python3-pip lz4 erofs-utils f2fs-tools libvixl-dev
-        && pip install gdown
+        sudo apt update
+        sudo apt -y upgrade
+        sudo apt -y install cpio aria2 git python3 neofetch tar gzip  p7zip-full python3-pip lz4 erofs-utils f2fs-tools libvixl-dev
+        pip install gdown
 
     - name: Setup GithubCLI
       run: |
