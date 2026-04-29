@@ -19,7 +19,7 @@ on:
         description: 'Device manufacturer'
         required: true
         default: ''
-      CODE_NANE:
+      CODE_NAME:
         description: 'Code name '
         required: true
         default: ''
@@ -51,7 +51,7 @@ jobs:
       GVT: ${{ github.event.inputs.GENERATE_VENDOR }}
       FUR: ${{ github.event.inputs.FIRMWARE_URL }}
       VENDOR: ${{ github.event.inputs.VENDOR_NAME }}
-      CODE: ${{ github.event.inputs.CODE_NANE }}
+      CODE: ${{ github.event.inputs.CODE_NAME }}
       UN: ${{ github.event.inputs.USER_NAME }}
       UEM: ${{ github.event.inputs.USER_EMAIL }}
     permissions:
@@ -65,17 +65,16 @@ jobs:
           
     - name: Clone and Setup DumprX
       run: |
-        cd /home
-        sudo mkdir mode=777 Auto-Dumper
-        cd Auto-Dumper
+        sudo mkdir -p /home/Auto-Dumper
+        sudo chmod 777 /home/Auto-Dumper
+        cd /home/Auto-Dumper
         git clone https://github.com/DumprX/DumprX
         cd DumprX
-        sudo chmod 777 *.sh
+        sudo chmod +x *.sh setup.sh
         bash setup.sh
-        pip3 install aospdtgen
-        pip3 install twrpdtgen
+        pip3 install aospdtgen twrpdtgen
       working-directory: ${{ github.workspace }}
-       
+      
     - name: Install UV
       run: curl -LsSf https://astral.sh/uv/install.sh | sh
         
@@ -105,14 +104,14 @@ jobs:
   
     - name: Install firmware 
       run: |
-        cd ./home/Auto-Dumper/DumprX/out
+        cd ./home/Auto-Dumper/DumprX
         ls 
         gdown "${{ env.FUR }}" -O firmware.zip
       working-directory: ${{ github.workspace }}
         
     - name: Create Dump
       run: |
-        cd ./home/Auto-Dumper/DumprX/out
+        cd ./home/Auto-Dumper/DumprX
         bash dumper.sh ./firmware.zip
         sudo chown -R $USER:$USER out
         sudo chmod -R 755 out
