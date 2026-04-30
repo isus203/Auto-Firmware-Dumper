@@ -67,7 +67,6 @@ jobs:
       run: |
         git clone https://github.com/DumprX/DumprX
         cd DumprX
-        ls
         sudo chmod +x *.sh
         bash setup.sh
         pip3 install aospdtgen twrpdtgen
@@ -93,7 +92,6 @@ jobs:
         
     - name: Authorize Git And GitHub CLI
       run: |
-        ls
         git config --global user.name "${{ env.UN }}"
         git config --global user.email "${{ env.UEM }}"
         unset GITHUB_TOKEN
@@ -102,9 +100,7 @@ jobs:
   
     - name: Install firmware 
       run: |
-        ls
         cd DumprX
-        ls 
         gdown "${{ env.FUR }}" -O firmware.zip
       working-directory: ${{ github.workspace }}
         
