@@ -117,7 +117,7 @@ jobs:
         cd DumprX/out
         ls
         sudo chmod -R 777 *
-        cd 
+        cd ../..
         ls
         echo "${{ env.CODE }}" >> codename.txt
         echo "${{ env.VENDOR }}" >> brand.txt
@@ -127,14 +127,14 @@ jobs:
            cd system
            version=$(grep "ro.build.version.release_or_codename=" build.prop | cut -d'=' -f2)
            fingerprint=$(grep "ro.system.build.fingerprint=" build.prop | cut -d'=' -f2)
-           cd /home/Auto-Firmware-Dumper
+           cd ../..
            echo "$version" >> version.txt
            echo "$fingerprint" >> fingerprint.txt
            cd DumprX/out
         else
            version=$(grep "ro.build.version.release_or_codename=" build.prop | cut -d'=' -f2)
            fingerprint=$(grep "ro.system.build.fingerprint=" build.prop | cut -d'=' -f2)
-           cd /home/Auto-Firmware-Dumper
+           cd ../..
            echo "$version" >> version.txt
            echo "$fingerprint" >> fingerprint.txt
            cd DumprX/out
@@ -160,7 +160,7 @@ jobs:
         git add .
         git commit -s -m "Dump for $brand $codename"
         gh repo create dump_"$brand"_"$codename" --public --description="$description" --source=. --remote=origin --push --debug
-        cd /home/Auto-Firmware-Dumper
+        cd ../..
         mkdir vnd_project
         mkdir vnd_project/dump
         mkdir -p vnd_project/android/device/"$brand"/"$codename"
