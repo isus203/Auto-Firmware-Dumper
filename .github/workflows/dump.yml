@@ -94,6 +94,8 @@ jobs:
       run: |
         git config --global user.name "${{ env.UN }}"
         git config --global user.email "${{ env.UEM }}"
+        git config --global http.postBuffer 999999999
+        git config --global core.compression 0
         unset GITHUB_TOKEN
         gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
       working-directory: ${{ github.workspace }}
