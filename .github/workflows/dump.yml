@@ -115,8 +115,10 @@ jobs:
     - name: Uploading ROM Dump
       run: |
         cd DumprX/out
+        ls
         sudo chmod -R 777 *
-        cd /home/Auto-Firmware-Dumper
+        cd 
+        ls
         echo "${{ env.CODE }}" >> codename.txt
         echo "${{ env.VENDOR }}" >> brand.txt
         cd DumprX/out
