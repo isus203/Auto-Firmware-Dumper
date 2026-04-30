@@ -140,18 +140,6 @@ jobs:
            cd DumprX/out
         fi
         sudo rm -rf .git
-        echo "Compressing images..."
-        max_size=48000000
-        images=("recovery.img" "boot.img" "vendor_boot.img" "init_boot.img" "dtbo.img" "dtb.img")
-        for pf in ${images[@]}; do
-           if [ -f $pf ]; then
-              if [[ $(stat -c %s $pf) -gt $max_size ]]; then
-                 cp $pf /home/Auto-Firmware-Dumper
-                 gzip -f $pf
-              fi
-           fi
-        done
-        find DumprX/out -type f -size +50M -delete -exec echo "Deleted: "{} \;
         dat=$(date +%Y%m%d)
         description="Dump for $brand $codename"
         description=$(echo "$description" | tr -d '\n\r\t')
