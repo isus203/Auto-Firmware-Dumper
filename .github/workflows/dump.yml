@@ -10,7 +10,7 @@ on:
       USER_EMAIL:
         description: 'E-mail of your GitHub Account'
         required: true
-        default: 'yagizzengin73@gmail.com'
+        default: ''
       FIRMWARE_URL:
         description: 'Stock ROM Link Google Drive '
         required: true
