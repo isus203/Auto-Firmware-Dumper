@@ -127,7 +127,7 @@ jobs:
            cd system
            version=$(grep "ro.build.version.release_or_codename=" build.prop | cut -d'=' -f2)
            fingerprint=$(grep "ro.system.build.fingerprint=" build.prop | cut -d'=' -f2)
-           cd ../..
+           cd ../../../..
            echo "$version" >> version.txt
            echo "$fingerprint" >> fingerprint.txt
            cd DumprX/out
