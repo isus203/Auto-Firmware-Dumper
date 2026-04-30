@@ -65,14 +65,10 @@ jobs:
           
     - name: Clone and Setup DumprX
       run: |
-        sudo mkdir -p /home/Auto-Dumper
-        ls
-        sudo chmod 777 /home/Auto-Dumper
-        cd /home/Auto-Dumper
         git clone https://github.com/DumprX/DumprX
         cd DumprX
         ls
-        sudo chmod +x *.sh setup.sh
+        sudo chmod +x *.sh
         bash setup.sh
         pip3 install aospdtgen twrpdtgen
       
@@ -85,7 +81,6 @@ jobs:
         sudo apt -y upgrade
         sudo apt -y install cpio aria2 git python3 neofetch tar gzip  p7zip-full python3-pip lz4 erofs-utils f2fs-tools libvixl-dev
         pip install gdown
-        ls
 
     - name: Setup GithubCLI
       run: |
@@ -95,7 +90,6 @@ jobs:
         && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
         && sudo apt update \
         && sudo apt install gh -y
-        ls
         
     - name: Authorize Git And GitHub CLI
       run: |
@@ -109,14 +103,14 @@ jobs:
     - name: Install firmware 
       run: |
         ls
-        cd ./home/Auto-Dumper/DumprX
+        cd DumprX
         ls 
         gdown "${{ env.FUR }}" -O firmware.zip
       working-directory: ${{ github.workspace }}
         
     - name: Create Dump
       run: |
-        cd ./home/Auto-Dumper/DumprX
+        cd DumprX
         bash dumper.sh ./firmware.zip
         sudo chown -R $USER:$USER out
         sudo chmod -R 755 out
@@ -124,28 +118,28 @@ jobs:
 
     - name: Uploading ROM Dump
       run: |
-        cd /home/Auto-Dumper/DumprX/out
+        cd DumprX/out
         sudo chmod -R 777 *
-        cd /home/Auto-Dumper
+        cd /home/Auto-Firmware-Dumper
         echo "${{ env.CODE }}" >> codename.txt
         echo "${{ env.VENDOR }}" >> brand.txt
-        cd /home/Auto-Dumper/DumprX/out
+        cd /home/Auto-Firmware-Dumper/DumprX/out
         cd system
         if [ -d system ]; then
            cd system
            version=$(grep "ro.build.version.release_or_codename=" build.prop | cut -d'=' -f2)
            fingerprint=$(grep "ro.system.build.fingerprint=" build.prop | cut -d'=' -f2)
-           cd /home/Auto-Dumper
+           cd /home/Auto-Firmware-Dumper
            echo "$version" >> version.txt
            echo "$fingerprint" >> fingerprint.txt
-           cd /home/Auto-Dumper/DumprX/out
+           cd /home/Auto-Firmware-Dumper/DumprX/out
         else
            version=$(grep "ro.build.version.release_or_codename=" build.prop | cut -d'=' -f2)
            fingerprint=$(grep "ro.system.build.fingerprint=" build.prop | cut -d'=' -f2)
-           cd /home/Auto-Dumper
+           cd /home/Auto-Firmware-Dumper
            echo "$version" >> version.txt
            echo "$fingerprint" >> fingerprint.txt
-           cd /home/Auto-Dumper/DumprX/out
+           cd /home/Auto-Firmware-Dumper/DumprX/out
         fi
         sudo rm -rf .git
         echo "Compressing images..."
@@ -154,12 +148,12 @@ jobs:
         for pf in ${images[@]}; do
            if [ -f $pf ]; then
               if [[ $(stat -c %s $pf) -gt $max_size ]]; then
-                 cp $pf /home/Auto-Dumper
+                 cp $pf /home/Auto-Firmware-Dumper
                  gzip -f $pf
               fi
            fi
         done
-        find /home/Auto-Dumper/DumprX/out -type f -size +50M -delete -exec echo "Deleted: "{} \;
+        find /home/Auto-Firmware-Dumper/DumprX/out -type f -size +50M -delete -exec echo "Deleted: "{} \;
         dat=$(date +%Y%m%d)
         description="Dump for $brand $codename"
         description=$(echo "$description" | tr -d '\n\r\t')
@@ -168,25 +162,25 @@ jobs:
         git add .
         git commit -s -m "Dump for $brand $codename"
         gh repo create dump_"$brand"_"$codename" --public --description="$description" --source=. --remote=origin --push --debug
-        cd /home/Auto-Dumper
+        cd /home/Auto-Firmware-Dumper
         mkdir vnd_project
         mkdir vnd_project/dump
         mkdir -p vnd_project/android/device/"$brand"/"$codename"
         cd DumprX/out
         if [ -d "$los_dir" ]; then
-           mv /home/Auto-Dumper/DumprX/out/lineage-device-tree/* /home/Auto-Dumper/vnd_project/android/device/"$brand"/"$codename"
+           mv /home/Auto-Firmware-Dumper/DumprX/out/lineage-device-tree/* /home/Auto-Firmware-Dumper/vnd_project/android/device/"$brand"/"$codename"
            rm -rf $los_dir
         else
            echo "LINEAGEOS DEVİCE TREE NOT FOUND!"
            echo "IF REQUESTED, VENDOR TREE WILL NOT BE CREATED"
         fi
-        mv /home/Auto-Dumper/DumprX/out/* /home/Auto-Dumper/vnd_project/dump
+        mv /home/Auto-Firmware-Dumper/DumprX/out/* /home/Auto-Firmware-Dumper/vnd_project/dump
 
     - name: Create vendor tree
       if: |
         env.GVT == 'true'
       run: |
-        cd /home/Auto-Dumper
+        cd /home/Auto-Firmware-Dumper
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         cd vnd_project
@@ -205,7 +199,7 @@ jobs:
         sudo chmod 777 android/device/"$brand"/"$codename"/setup-makefiles.sh
         cd android/device/"$brand"/"$codename"
         sudo chmod 777 extract-files.sh
-        bash extract-files.sh /home/Auto-Dumper/vnd_project/dump/
+        bash extract-files.sh /home/Auto-Firmware-Dumper/vnd_project/dump/
         echo "Done extracting and making files."
         echo "Pushing as repository now."
 
@@ -213,7 +207,7 @@ jobs:
       if: |
         env.GVT == 'true'
       run: |
-        cd /home/Auto-Dumper
+        cd /home/Auto-Firmware-Dumper
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         cd vnd_project/android/vendor/"$brand"/"$codename"
@@ -225,7 +219,7 @@ jobs:
         git commit -s -m "$codename : initial vendor tree"
         gh repo create android_vendor_"$brand"_"$codename" --public --description="Vendor tree for $codename" --source=. --remote=origin --push
         echo "Succesfull"
-        cd /home/Auto-Dumper
+        cd /home/Auto-Firmware-Dumper
         sudo rm -rf DumprX
         sudo rm -rf vnd_project
 
@@ -233,7 +227,7 @@ jobs:
       if: |
         env.LOT == 'true'
       run: |
-        cd /home/Auto-Dumper
+        cd /home/Auto-Firmware-Dumper
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         cd lineage-device-tree
@@ -249,7 +243,7 @@ jobs:
       if: |
         env.TWT == 'true'
       run: |
-        cd /home/Auto-Dumper
+        cd /home/Auto-Firmware-Dumper
         codename=$(cat codename.txt)
         brand=$(cat brand.txt)
         version=$(cat version.txt)
@@ -268,11 +262,11 @@ jobs:
       with: 
         name: Prewiew images
         path: |
-          /home/Auto-Dumper/boot.img
-          /home/Auto-Dumper/recovery.img
+          /home/Auto-Firmware-Dumper/boot.img
+          /home/Auto-Firmware-Dumper/recovery.img
           /home/Auto-Dumper/vendor_boot.img
-          /home/Auto-Dumper/init_boot.img
-          /home/Auto-Dumper/dtbo.img
-          /home/Auto-Dumper/dtb.img
+          /home/Auto-Firmware-Dumper/init_boot.img
+          /home/Auto-Firmware-Dumper/dtbo.img
+          /home/Auto-Firmware-Dumper/dtb.img
         if-no-files-found: ignore
       continue-on-error: true
