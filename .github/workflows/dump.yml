@@ -116,7 +116,8 @@ jobs:
 
     - name: Extract Device Info
       run: |
-        cd DumprX/out
+        # Переходим в директорию с дампом
+        cd out
 
         # Функция для проверки "мусорных" значений (Tecno/Infinix/MTK Generic)
         is_bad_val() {
@@ -124,7 +125,7 @@ jobs:
             [[ -z "$1" || "$val" == "ALPS" || "$val" == "UNKNOWN" || "$val" == "GENERIC" || "$val" == *"MGVI"* || "$val" == *"64ONLY"* || "$val" == "SVP" ]]
         }
 
-        # 1. Извлекаем FINGERPRINT (база для всех данных)
+        # 1. Извлекаем FINGERPRINT
         fingerprint=$(grep -m1 -oP "(?<=^ro.build.fingerprint=).*" -hs {system,system/system,vendor,product,system_ext}/build*.prop | head -1)
         [[ -z "${fingerprint}" ]] && fingerprint=$(grep -m1 -oP "(?<=^ro.vendor.build.fingerprint=).*" -hs vendor/build*.prop | head -1)
         [[ -z "${fingerprint}" ]] && fingerprint=$(grep -m1 -oP "(?<=^ro.system.build.fingerprint=).*" -hs {system,system/system,system_ext}/build*.prop | head -1)
@@ -132,26 +133,17 @@ jobs:
         # 2. Извлекаем BRAND
         brand=$(grep -m1 -oP "(?<=^ro.product.brand=).*" -hs {system,system/system,vendor,product,system_ext}/build*.prop | head -1)
         if is_bad_val "$brand"; then
-            # Попытка найти реальный бренд в модели (часто для Tecno/Infinix)
-            brand_check=$(grep -m1 -oP "(?<=^ro.product.model=).*" -hs {product,system,vendor,odm}/build*.prop | head -1 | cut -d' ' -f1)
-            if [ ! -z "$brand_check" ]; then
-                brand="$brand_check"
-            else
-                brand=$(echo "$fingerprint" | cut -d'/' -f1)
-            fi
+            brand_check=$(grep -m1 -oP "(?<=^ro.product.model=).*" -hs {product,system,vendor,odm,system_ext}/build*.prop | head -1 | cut -d' ' -f1)
+            if [ ! -z "$brand_check" ]; then brand="$brand_check"; else brand=$(echo "$fingerprint" | cut -d'/' -f1); fi
         fi
         brand=$(echo "$brand" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]_')
 
         # 3. Извлекаем CODENAME
         codename=$(grep -m1 -oP "(?<=^ro.product.device=).*" -hs {vendor,system,system/system,product,system_ext}/build*.prop | head -1)
         if is_bad_val "$codename"; then
-            # Если имя техническое (mgvi...), берем модель (напр. Tecno-LI9)
-            model_check=$(grep -m1 -oP "(?<=^ro.product.model=).*" -hs {product,system,vendor,odm}/build*.prop | head -1 | tr -d '[:space:]' | tr '-' '_')
-            if [ ! -z "$model_check" ]; then
-                codename="$model_check"
-            else
-                codename=$(echo "$fingerprint" | cut -d'/' -f3 | cut -d':' -f1)
-            fi
+            # Для Tecno/Infinix берем модель, так как device обычно "mgvi..."
+            model_check=$(grep -m1 -oP "(?<=^ro.product.model=).*" -hs {product,system,vendor,odm,system_ext}/build*.prop | head -1 | tr -d '[:space:]' | tr '-' '_')
+            if [ ! -z "$model_check" ]; then codename="$model_check"; else codename=$(echo "$fingerprint" | cut -d'/' -f3 | cut -d':' -f1); fi
         fi
         codename=$(echo "$codename" | tr -cd '[:alnum:]_')
 
@@ -160,21 +152,21 @@ jobs:
         [[ -z "${version}" ]] && version=$(grep -m1 -oP "(?<=^ro.build.version.release=).*" -hs {system,system/system,vendor,product,system_ext}/build*.prop | head -1)
         version=$(echo "$version" | tr -d '[:space:]')
 
-        # Сохраняем во временные файлы
+        # Сохраняем результаты в корневой директории воркаута
         echo "$codename" > ${{ github.workspace }}/codename.txt
         echo "$brand" > ${{ github.workspace }}/brand.txt
         echo "$version" > ${{ github.workspace }}/version.txt
         echo "$fingerprint" > ${{ github.workspace }}/fingerprint.txt
 
-        # Вывод в Summary для красоты
-        echo "### 📱 Device Information" >> $GITHUB_STEP_SUMMARY
-        echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+        # Вывод данных в Summary (таблица появится под графиком выполнения)
+        echo "### 📱 Информация об устройстве" >> $GITHUB_STEP_SUMMARY
+        echo "| Параметр | Значение |" >> $GITHUB_STEP_SUMMARY
         echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-        echo "| **Brand** | $brand |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Codename** | $codename |" >> $GITHUB_STEP_SUMMARY
-        echo "| **Android Version** | $version |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Бренд** | $brand |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Кодовое имя** | $codename |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Версия Android** | $version |" >> $GITHUB_STEP_SUMMARY
         echo "| **Fingerprint** | \`$fingerprint\` |" >> $GITHUB_STEP_SUMMARY
-
+        
     - name: Uploading ROM Dump
       env:
         GH_TOKEN: ${{ secrets.GH_TOKEN }} # Убедись, что секрет добавлен в настройки репозитория
@@ -182,7 +174,7 @@ jobs:
         codename=$(cat ${{ github.workspace }}/codename.txt)
         brand=$(cat ${{ github.workspace }}/brand.txt)
         dat=$(date +%Y%m%d)
-        
+        cd ../..
         cd DumprX/out
         sudo chmod -R 777 *
         sudo rm -rf .git
