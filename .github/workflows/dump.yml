@@ -118,51 +118,55 @@ jobs:
       run: |
         cd DumprX/out
 
-        is_garbage() {
+        # Функция для проверки "мусорных" значений (Tecno/Infinix/MTK Generic)
+        is_bad_val() {
             local val=$(echo "$1" | tr '[:lower:]' '[:upper:]')
-            [[ -z "$1" || "$val" == "FULL-64" || "$val" == "GENERIC" || "$val" == "UNKNOWN" || "$val" == "SVP" ]]
+            [[ -z "$1" || "$val" == "ALPS" || "$val" == "UNKNOWN" || "$val" == "GENERIC" || "$val" == *"MGVI"* || "$val" == *"64ONLY"* || "$val" == "SVP" ]]
         }
 
-        # 1. Извлекаем FINGERPRINT
+        # 1. Извлекаем FINGERPRINT (база для всех данных)
         fingerprint=$(grep -m1 -oP "(?<=^ro.build.fingerprint=).*" -hs {system,system/system,vendor,product,system_ext}/build*.prop | head -1)
         [[ -z "${fingerprint}" ]] && fingerprint=$(grep -m1 -oP "(?<=^ro.vendor.build.fingerprint=).*" -hs vendor/build*.prop | head -1)
         [[ -z "${fingerprint}" ]] && fingerprint=$(grep -m1 -oP "(?<=^ro.system.build.fingerprint=).*" -hs {system,system/system,system_ext}/build*.prop | head -1)
 
         # 2. Извлекаем BRAND
         brand=$(grep -m1 -oP "(?<=^ro.product.brand=).*" -hs {system,system/system,vendor,product,system_ext}/build*.prop | head -1)
-        is_garbage "$brand" && brand=$(grep -m1 -oP "(?<=^ro.product.vendor.brand=).*" -hs vendor/build*.prop | head -1)
-        is_garbage "$brand" && brand=$(grep -m1 -oP "(?<=^ro.product.product.brand=).*" -hs product/build*.prop | head -1)
-        [[ -z "${brand}" || ${brand} == "OPPO" ]] && brand=$(grep -m1 -oP "(?<=^ro.product.system.brand=).*" -hs vendor/euclid/*/build.prop | head -1)
-        is_garbage "$brand" && brand=$(echo "$fingerprint" | cut -d'/' -f1)
-        brand=$(echo "$brand" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        if is_bad_val "$brand"; then
+            # Попытка найти реальный бренд в модели (часто для Tecno/Infinix)
+            brand_check=$(grep -m1 -oP "(?<=^ro.product.model=).*" -hs {product,system,vendor,odm}/build*.prop | head -1 | cut -d' ' -f1)
+            if [ ! -z "$brand_check" ]; then
+                brand="$brand_check"
+            else
+                brand=$(echo "$fingerprint" | cut -d'/' -f1)
+            fi
+        fi
+        brand=$(echo "$brand" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]_')
 
         # 3. Извлекаем CODENAME
         codename=$(grep -m1 -oP "(?<=^ro.product.device=).*" -hs {vendor,system,system/system,product,system_ext}/build*.prop | head -1)
-        is_garbage "$codename" && codename=$(grep -m1 -oP "(?<=^ro.product.vendor.device=).*" -hs vendor/build*.prop | head -1)
-        is_garbage "$codename" && codename=$(grep -m1 -oP "(?<=^ro.product.product.device=).*" -hs product/build*.prop | head -1)
-        is_garbage "$codename" && codename=$(echo "$fingerprint" | cut -d'/' -f3 | cut -d':' -f1)
-        codename=$(echo "$codename" | tr -d '[:space:]')
+        if is_bad_val "$codename"; then
+            # Если имя техническое (mgvi...), берем модель (напр. Tecno-LI9)
+            model_check=$(grep -m1 -oP "(?<=^ro.product.model=).*" -hs {product,system,vendor,odm}/build*.prop | head -1 | tr -d '[:space:]' | tr '-' '_')
+            if [ ! -z "$model_check" ]; then
+                codename="$model_check"
+            else
+                codename=$(echo "$fingerprint" | cut -d'/' -f3 | cut -d':' -f1)
+            fi
+        fi
+        codename=$(echo "$codename" | tr -cd '[:alnum:]_')
 
         # 4. Извлекаем VERSION
         version=$(grep -m1 -oP "(?<=^ro.build.version.release_or_codename=).*" -hs {system,system/system,vendor,product,system_ext}/build*.prop | head -1)
         [[ -z "${version}" ]] && version=$(grep -m1 -oP "(?<=^ro.build.version.release=).*" -hs {system,system/system,vendor,product,system_ext}/build*.prop | head -1)
         version=$(echo "$version" | tr -d '[:space:]')
 
-        # Сохраняем результаты (используем путь workspace для надежности)
+        # Сохраняем во временные файлы
         echo "$codename" > ${{ github.workspace }}/codename.txt
         echo "$brand" > ${{ github.workspace }}/brand.txt
         echo "$version" > ${{ github.workspace }}/version.txt
         echo "$fingerprint" > ${{ github.workspace }}/fingerprint.txt
-        
-        # --- НОВЫЙ БЛОК: Вывод данных в консоль и Summary ---
-        echo "::group::Device Information Details"
-        echo "Brand: $brand"
-        echo "Codename: $codename"
-        echo "Version: $version"
-        echo "Fingerprint: $fingerprint"
-        echo "::endgroup::"
 
-        # Создаем красивую таблицу в интерфейсе GitHub
+        # Вывод в Summary для красоты
         echo "### 📱 Device Information" >> $GITHUB_STEP_SUMMARY
         echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
         echo "|---|---|" >> $GITHUB_STEP_SUMMARY
@@ -172,37 +176,35 @@ jobs:
         echo "| **Fingerprint** | \`$fingerprint\` |" >> $GITHUB_STEP_SUMMARY
 
     - name: Uploading ROM Dump
+      env:
+        GH_TOKEN: ${{ secrets.GH_TOKEN }} # Убедись, что секрет добавлен в настройки репозитория
       run: |
-        # Загружаем сохраненные данные
         codename=$(cat ${{ github.workspace }}/codename.txt)
         brand=$(cat ${{ github.workspace }}/brand.txt)
+        dat=$(date +%Y%m%d)
         
-        # Подготовка дерева
-        los_dir="lineage-device-tree"
-        [ -d "DumprX/out/$los_dir" ] && cp -r "DumprX/out/$los_dir" ${{ github.workspace }}/
-
         cd DumprX/out
         sudo chmod -R 777 *
         sudo rm -rf .git
         
-        dat=$(date +%Y%m%d)
-        description="Dump for $brand $codename"
+        git config --global init.defaultBranch main
         
         git init
         git branch -M dump-"$codename"-"$dat"
         git add .
         git commit -s -m "Dump for $brand $codename"
+        
+        description="Dump for $brand $codename (Android $(cat ${{ github.workspace }}/version.txt))"
         gh repo create dump_"$brand"_"$codename" --public --description="$description" --source=. --remote=origin --push
         
-        # Создаем структуру для Vendor Tree
-        cd ${{ github.workspace }}
-        mkdir -p vnd_project/dump
-        mkdir -p vnd_project/android/device/"$brand"/"$codename"
+        # Подготовка структуры для Vendor Tree
+        mkdir -p ${{ github.workspace }}/vnd_project/dump
+        mkdir -p ${{ github.workspace }}/vnd_project/android/device/"$brand"/"$codename"
         
-        if [ -d "$los_dir" ]; then
-           mv ${{ github.workspace }}/$los_dir/* vnd_project/android/device/"$brand"/"$codename"/
-        fi
-        mv DumprX/out/* vnd_project/dump/ 2>/dev/null || true
+        [ -d "lineage-device-tree" ] && mv lineage-device-tree/* ${{ github.workspace }}/vnd_project/android/device/"$brand"/"$codename"/
+        mv * ${{ github.workspace }}/vnd_project/dump/ 2>/dev/null || true
+        
+        echo "🚀 **ROM Dump:** [dump_${brand}_${codename}](https://github.com/${{ github.repository_owner }}/dump_${brand}_${codename})" >> $GITHUB_STEP_SUMMARY
 
     - name: Create vendor tree
       if: env.GVT == 'true'
@@ -210,14 +212,12 @@ jobs:
         codename=$(cat ${{ github.workspace }}/codename.txt)
         brand=$(cat ${{ github.workspace }}/brand.txt)
         
-        cd vnd_project
+        cd ${{ github.workspace }}/vnd_project
         if [ -d android/device/"$brand"/"$codename" ]; then
-           git clone --depth=1 https://github.com/LineageOS/android_tools_extract-utils -b lineage-22.2 ./android/tools/extract-utils
-           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_extract-tools -b lineage-22.2 ./android/prebuilts/extract-tools
+           git clone --depth=1 https://github.com/LineageOS/android_tools_extract-utils -b lineage-22.1 ./android/tools/extract-utils
+           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_extract-tools -b lineage-22.1 ./android/prebuilts/extract-tools
            
-           sudo chmod 777 android/device/"$brand"/"$codename"/setup-makefiles.sh
-           sudo chmod 777 android/device/"$brand"/"$codename"/extract-files.sh
-           
+           sudo chmod 777 android/device/"$brand"/"$codename"/*.sh
            cd android/device/"$brand"/"$codename"
            bash extract-files.sh ${{ github.workspace }}/vnd_project/dump/
         else
@@ -227,49 +227,33 @@ jobs:
 
     - name: Uploading Vendor Tree
       if: env.GVT == 'true'
+      env:
+        GH_TOKEN: ${{ secrets.GH_TOKEN }}
       run: |
         codename=$(cat ${{ github.workspace }}/codename.txt)
         brand=$(cat ${{ github.workspace }}/brand.txt)
         
-        cd vnd_project/android/vendor/"$brand"/"$codename"
-        sudo chmod -R 777 *
-        dat=$(date +%Y%m%d)
+        cd ${{ github.workspace }}/vnd_project/android/vendor/"$brand"/"$codename"
         git init
-        git branch -M vendor-"$codename"-"$dat"
+        git branch -M vendor-"$codename"-$(date +%Y%m%d)
         git add .
-        git commit -s -m "$codename : initial vendor tree"
+        git commit -s -m "$codename: initial vendor tree"
         gh repo create android_vendor_"$brand"_"$codename" --public --description="Vendor tree for $codename" --source=. --remote=origin --push
+        echo "🌳 **Vendor Tree:** [android_vendor_${brand}_${codename}](https://github.com/${{ github.repository_owner }}/android_vendor_${brand}_${codename})" >> $GITHUB_STEP_SUMMARY
 
     - name: Uploading LineageOS Device Tree
       if: env.LOT == 'true'
+      env:
+        GH_TOKEN: ${{ secrets.GH_TOKEN }}
       run: |
         codename=$(cat ${{ github.workspace }}/codename.txt)
         brand=$(cat ${{ github.workspace }}/brand.txt)
-        cd lineage-device-tree
+        cd ${{ github.workspace }}/vnd_project/android/device/"$brand"/"$codename"
         git init
         git branch -M lineage-"$codename"-$(date +%Y%m%d)
         git add .
-        git commit -s -m "$codename : LineageOS compatible device tree"
-        gh repo create lineage_device_"$brand"_"$codename" --public --description="LineageOS compatible tree for $codename" --source=. --remote=origin --push
-      continue-on-error: true
-
-    - name: Uploading TWRP Device Tree
-      if: env.TWT == 'true'
-      run: |
-        codename=$(cat ${{ github.workspace }}/codename.txt)
-        brand=$(cat ${{ github.workspace }}/brand.txt)
-        version=$(cat ${{ github.workspace }}/version.txt)
-        
-        cd twrp-device-tree
-        # Поиск папки (некоторые дамперы кладут в разные подпапки)
-        target_dir=$(find . -type d -name "$codename" | head -1)
-        cd "$target_dir"
-        
-        git init
-        git branch -M twrp-"$version"-$(date +%Y%m%d)
-        git add .
-        git commit -s -m "$codename : TWRP compatible device tree"
-        gh repo create twrp_device_"$brand"_"$codename" --public --description="TWRP compatible tree for $codename" --source=. --remote=origin --push
+        git commit -s -m "$codename: LineageOS device tree"
+        gh repo create lineage_device_"$brand"_"$codename" --public --description="LineageOS tree for $codename" --source=. --remote=origin --push
       continue-on-error: true
 
     - name: Uploading preview of images
