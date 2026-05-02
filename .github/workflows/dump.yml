@@ -116,7 +116,7 @@ jobs:
 
     - name: Extract Device Info
       run: |
-        cd out
+        cd DumprX/out
         
         # Функция для проверки "мусорных" значений
         is_bad_val() {
@@ -177,7 +177,6 @@ jobs:
         repo_name="dump_${brand}_${codename}"
         dat=$(date +%Y%m%d)
 
-        cd ../..
         cd DumprX/out
         sudo chmod -R 777 *
         sudo rm -rf .git
