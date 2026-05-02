@@ -154,7 +154,22 @@ jobs:
         echo "$version" > ${{ github.workspace }}/version.txt
         echo "$fingerprint" > ${{ github.workspace }}/fingerprint.txt
         
-        echo "Detected: $brand $codename (Android $version)"
+        # --- НОВЫЙ БЛОК: Вывод данных в консоль и Summary ---
+        echo "::group::Device Information Details"
+        echo "Brand: $brand"
+        echo "Codename: $codename"
+        echo "Version: $version"
+        echo "Fingerprint: $fingerprint"
+        echo "::endgroup::"
+
+        # Создаем красивую таблицу в интерфейсе GitHub
+        echo "### 📱 Device Information" >> $GITHUB_STEP_SUMMARY
+        echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Brand** | $brand |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Codename** | $codename |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Android Version** | $version |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Fingerprint** | \`$fingerprint\` |" >> $GITHUB_STEP_SUMMARY
 
     - name: Uploading ROM Dump
       run: |
