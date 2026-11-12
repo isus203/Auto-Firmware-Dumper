@@ -115,6 +115,7 @@ jobs:
             flex git git-lfs gzip jq liblz4-tool lz4 m4 p7zip-full \
             python3-venv rsync tar unzip wget xz-utils zstd
           git lfs install --skip-repo
+          pip install gdown
           command -v gh >/dev/null || { echo 'GitHub CLI (gh) is missing'; exit 1; }
 
       - name: Free unused SDK disk space
@@ -163,7 +164,8 @@ jobs:
           cd DumprX
           # DumprX accepts direct links, Google Drive, AndroidFileHost, etc.
           # Do not force every downloaded firmware to be named firmware.zip.
-          bash dumper.sh "$FIRMWARE_URL"
+          gdown "$FIRMWARE_URL" -O firmware.zip
+          bash dumper.sh ./firmware.zip
           test -d out || { echo 'DumprX/out was not created'; exit 1; }
           if ! find out -type f -name 'build.prop' -print -quit | grep -q .; then
             echo 'No build.prop was found: firmware extraction may have failed'
