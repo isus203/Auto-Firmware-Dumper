@@ -85,7 +85,7 @@ jobs:
       # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
       DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
       DUMPRX_REF: ${{ vars.DUMPRX_REF || '' }}
-      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/isus203/aospdtgen_mtk }}
+      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/isus203/aospdtgen_mtk' }}
       AOSPDTGEN_REF: ${{ vars.AOSPDTGEN_REF || '' }}
       SEPOLICY_DECOMPILER_REPO: ${{ vars.SEPOLICY_DECOMPILER_REPO || 'https://github.com/isus203/SELinux-CIL-Decompiler.git' }}
       SEPOLICY_DECOMPILER_REF: ${{ vars.SEPOLICY_DECOMPILER_REF || '' }}
