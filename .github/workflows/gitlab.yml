@@ -1,6 +1,6 @@
 # WARNING: This workflow is intended only for MediaTek (MTK) firmware/devices.
 # It is not supported or validated for Qualcomm, Exynos, Unisoc, etc.
-name: Auto Firmware Dumper - MTK Only (GitLab Upload)
+name: Auto Firmware Dumper - MTK Only (GitLab Git + LFS)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
         default: ''
         type: string
       CODE_NAME:
-        description: 'Device codename fallback (not model name)'
+        description: 'Actual MTK device codename override (e.g. LJ9); optional'
         required: false
         default: ''
         type: string
@@ -71,6 +71,9 @@ jobs:
       # Use the GitHub Actions bot no-reply address for every new commit.
       GIT_AUTHOR_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
       GIT_COMMITTER_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
+      PUBLISH_PROVIDER: gitlab
+      PUSH_PAUSE_SECONDS: ${{ vars.DUMP_PUSH_PAUSE_SECONDS || '10' }}
+      GITHUB_LFS_QUOTA_GIB: ${{ vars.GITHUB_LFS_QUOTA_GIB || '10' }}
       VENDOR_FALLBACK: ${{ inputs.VENDOR_NAME }}
       CODE_FALLBACK: ${{ inputs.CODE_NAME }}
       SEPOLICY_MODE: ${{ inputs.SEPOLICY_MODE }}
@@ -194,9 +197,13 @@ jobs:
           brand="$(read_prop ro.product.manufacturer)"
           [[ -n "$brand" ]] || brand="$(read_prop ro.product.brand)"
           [[ -n "$brand" ]] || brand="$VENDOR_FALLBACK"
-          codename="$(read_prop ro.product.device)"
+          # Generic MTK system images often identify as mssi_*; prefer the
+          # actual device from the vendor partition or explicit CODE_NAME.
+          codename="$CODE_FALLBACK"
+          [[ -n "$codename" ]] || codename="$(read_prop ro.product.vendor.device)"
+          [[ -n "$codename" ]] || codename="$(read_prop ro.product.odm.device)"
+          [[ -n "$codename" ]] || codename="$(read_prop ro.product.device)"
           [[ -n "$codename" ]] || codename="$(read_prop ro.build.product)"
-          [[ -n "$codename" ]] || codename="$CODE_FALLBACK"
           version="$(read_prop ro.build.version.release)"
           [[ -n "$version" ]] || version="unknown"
           branch="$(read_prop ro.vendor.build.id)"
@@ -298,7 +305,7 @@ jobs:
           python -m aospdtgen --help >/dev/null
           printf 'aospdtgen commit: %s\n' "$(git -C "$src" rev-parse HEAD)"
           mkdir -p "$GITHUB_WORKSPACE/generated/lineage" \
-                   "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME"
+                   "$GITHUB_WORKSPACE/generated/android/device"
           python -m aospdtgen -o "$GITHUB_WORKSPACE/generated/lineage" "$GITHUB_WORKSPACE/DumprX/out"
           # New aospdtgen generates extract-files.py; older releases use .sh.
           # Some device trees have no proprietary-files list; BoardConfig.mk
@@ -306,8 +313,93 @@ jobs:
           test -f "$GITHUB_WORKSPACE/generated/lineage/BoardConfig.mk" || {
             echo 'aospdtgen produced no BoardConfig.mk'; exit 1;
           }
-          cp -a "$GITHUB_WORKSPACE/generated/lineage/." \
-            "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME/"
+          # aospdtgen may use a generic system device name for the output
+          # directory (mssi_64_64only_cn_armv82), while its generated extractor
+          # explicitly targets the actual device (e.g. device/tecno/LJ9).
+          # ExtractUtilsModule(device, vendor) is authoritative here.
+          python - <<'PY_TREE'
+          import ast
+          import os
+          import re
+          import shutil
+          from pathlib import Path
+
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          src = workspace / 'generated/lineage'
+          android = workspace / 'generated/android'
+          extractor = src / 'extract-files.py'
+          vendor_requested = os.environ.get('GENERATE_VENDOR') == 'true'
+
+          brand = os.environ['BRAND']
+          device = os.environ['CODENAME']
+          if extractor.is_file():
+              source = extractor.read_text(encoding='utf-8')
+              tree = ast.parse(source, filename=str(extractor))
+              constants = {}
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                      for target in node.targets:
+                          if isinstance(target, ast.Name):
+                              constants[target.id] = node.value.value
+
+              def string_value(node):
+                  if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                      return node.value
+                  if isinstance(node, ast.Name):
+                      value = constants.get(node.id)
+                      return value if isinstance(value, str) else None
+                  return None
+
+              modules = []
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.Call):
+                      continue
+                  name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, 'attr', None)
+                  if name != 'ExtractUtilsModule':
+                      continue
+                  args = [string_value(arg) for arg in node.args]
+                  kwargs = {k.arg: string_value(k.value) for k in node.keywords if k.arg}
+                  mod_device = args[0] if len(args) > 0 else kwargs.get('device') or kwargs.get('device_name')
+                  mod_vendor = args[1] if len(args) > 1 else kwargs.get('vendor')
+                  if mod_device and mod_vendor:
+                      modules.append((mod_vendor, mod_device))
+              modules = list(dict.fromkeys(modules))
+              if len(modules) != 1:
+                  if vendor_requested:
+                      raise SystemExit(
+                          f'::error::Cannot resolve a unique ExtractUtilsModule(device,vendor) in {extractor}: {modules}. '
+                          'Set CODE_NAME and use an aospdtgen version with a valid extract-files.py.'
+                      )
+                  print(f'::warning::Cannot resolve ExtractUtilsModule; using metadata {brand}/{device}')
+              else:
+                  brand, device = modules[0]
+          elif vendor_requested:
+              raise SystemExit('::error::aospdtgen generated no extract-files.py, cannot extract vendor blobs')
+
+          valid = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z')
+          for name, value in [('vendor', brand), ('device', device)]:
+              if not valid.fullmatch(value) or value in ('.', '..'):
+                  raise SystemExit(f'::error::Unsafe generated {name} identifier: {value!r}')
+
+          target = android / 'device' / brand / device
+          target.mkdir(parents=True, exist_ok=True)
+          shutil.copytree(src, target, dirs_exist_ok=True, symlinks=True)
+          if vendor_requested and not (target / 'proprietary-files.txt').is_file():
+              available = sorted(p.name for p in target.glob('*proprietary*'))
+              raise SystemExit(
+                  f'::error::Missing {target}/proprietary-files.txt; extractor expects this file. '
+                  f'Generated candidates: {available}. Check aospdtgen output before vendor extraction.'
+              )
+          if (brand, device) != (os.environ['BRAND'], os.environ['CODENAME']):
+              print(f'::warning::System build.prop reported {os.environ["BRAND"]}/{os.environ["CODENAME"]}, '
+                    f'but aospdtgen extractor targets {brand}/{device}; using extractor identity')
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as env:
+              env.write(f'TREE_BRAND={brand}\nTREE_CODENAME={device}\n')
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
+              summary.write(f'- Generated device tree: `device/{brand}/{device}`\n')
+          print('Device tree:', target)
+          print('Proprietary-files present:', (target / 'proprietary-files.txt').exists())
+          PY_TREE
 
       - name: Extract vendor tree (when requested)
         if: env.GENERATE_VENDOR == 'true'
@@ -321,7 +413,16 @@ jobs:
           git clone --depth 1 --branch "$EXTRACT_TOOLS_REF" \
             https://github.com/LineageOS/android_prebuilts_extract-tools.git \
             "$android/prebuilts/extract-tools"
-          cd "$android/device/$BRAND/$CODENAME"
+          # Use the identity declared in ExtractUtilsModule, not generic
+          # ro.product.device (e.g. mssi_64_64only_cn_armv82).
+          tree_brand="${TREE_BRAND:-$BRAND}"
+          tree_codename="${TREE_CODENAME:-$CODENAME}"
+          tree_dir="$android/device/$tree_brand/$tree_codename"
+          [[ -d "$tree_dir" ]] || { echo "::error::Device tree missing: $tree_dir"; exit 1; }
+          [[ -f "$tree_dir/proprietary-files.txt" ]] || {
+            echo "::error::Device tree missing proprietary-files.txt: $tree_dir"; exit 1;
+          }
+          cd "$tree_dir"
           if [[ -f extract-files.py ]]; then
             PYTHONPATH="$android/tools/extract-utils${PYTHONPATH:+:$PYTHONPATH}" \
               python extract-files.py "$GITHUB_WORKSPACE/DumprX/out"
@@ -331,8 +432,8 @@ jobs:
             echo '::error::The selected aospdtgen version produced no extract-files.py/sh'
             exit 1
           fi
-          [[ -d "$android/vendor/$BRAND/$CODENAME" ]] || {
-            echo 'Vendor extraction produced no vendor tree'; exit 1;
+          [[ -d "$android/vendor/$tree_brand/$tree_codename" ]] || {
+            echo "::error::Vendor extraction produced no vendor tree at vendor/$tree_brand/$tree_codename"; exit 1;
           }
 
       - name: Generate TWRP tree (when requested)
@@ -370,6 +471,8 @@ jobs:
           [[ -n "$GH_TOKEN" ]] || { echo 'GTOKEN secret is required to create tree repositories'; exit 1; }
           gh auth setup-git
           git_user="${USER_NAME:-github-actions[bot]}"
+          tree_brand="${TREE_BRAND:-$BRAND}"
+          tree_codename="${TREE_CODENAME:-$CODENAME}"
           publish_tree() {
             local source="$1" repo="$2" branch="$3"
             [[ -d "$source" ]] || { echo "Missing generated tree: $source"; return 1; }
@@ -391,12 +494,12 @@ jobs:
             echo "- [$repo](https://github.com/$TARGET_OWNER/$repo/tree/$branch)" >> "$GITHUB_STEP_SUMMARY"
           }
           if [[ "$GENERATE_VENDOR" == 'true' ]]; then
-            publish_tree "$GITHUB_WORKSPACE/generated/android/vendor/$BRAND/$CODENAME" \
-              "android_vendor_${BRAND}_${CODENAME}" "vendor-${CODENAME}-${GITHUB_RUN_ID}"
+            publish_tree "$GITHUB_WORKSPACE/generated/android/vendor/$tree_brand/$tree_codename" \
+              "android_vendor_${tree_brand}_${tree_codename}" "vendor-${tree_codename}-${GITHUB_RUN_ID}"
           fi
           if [[ "$UPLOAD_LINEAGE_DT" == 'true' ]]; then
-            publish_tree "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME" \
-              "lineage_device_${BRAND}_${CODENAME}" "lineage-${CODENAME}-${GITHUB_RUN_ID}"
+            publish_tree "$GITHUB_WORKSPACE/generated/android/device/$tree_brand/$tree_codename" \
+              "lineage_device_${tree_brand}_${tree_codename}" "lineage-${tree_codename}-${GITHUB_RUN_ID}"
           fi
           if [[ "$UPLOAD_TWRP_DT" == 'true' ]]; then
             mapfile -d '' trees < <(find "$GITHUB_WORKSPACE/generated/twrp/output" \
@@ -405,19 +508,75 @@ jobs:
               echo 'Cannot uniquely locate generated TWRP tree'; exit 1;
             }
             publish_tree "$(dirname "${trees[0]}")" \
-              "twrp_device_${BRAND}_${CODENAME}" "twrp-${CODENAME}-${GITHUB_RUN_ID}"
+              "twrp_device_${tree_brand}_${tree_codename}" "twrp-${tree_codename}-${GITHUB_RUN_ID}"
           fi
-      - name: Create or resolve GitLab repository
+      - name: Preflight Git and LFS sizes
+        run: |
+          set -euo pipefail
+          rm -rf "$GITHUB_WORKSPACE/DumprX/out/tmp"
+          python - <<'PY_PREFLIGHT'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['GITHUB_WORKSPACE']) / 'DumprX' / 'out'
+          lfs_threshold = 50 * 1024 * 1024
+          github_max_file = 2_000_000_000  # Conservative GitHub Free 2 GB/file bound
+          size_total = size_lfs = n_lfs = n_files = 0
+          too_large = []
+          for directory, subdirs, filenames in os.walk(root, followlinks=False):
+              subdirs[:] = [name for name in subdirs if name not in ('.git', 'tmp')]
+              for name in filenames:
+                  file = Path(directory) / name
+                  if file.is_symlink():
+                      continue
+                  try:
+                      size = file.stat().st_size
+                  except OSError:
+                      continue
+                  n_files += 1
+                  size_total += size
+                  if size >= lfs_threshold:
+                      size_lfs += size
+                      n_lfs += 1
+                      if size > github_max_file:
+                          too_large.append((str(file.relative_to(root)), size))
+          def gib(n):
+              return f'{n / (1024**3):.2f} GiB'
+          print(f'Files: {n_files}; total: {gib(size_total)}')
+          print(f'Files >= 50 MiB: {n_lfs}; estimated LFS: {gib(size_lfs)}')
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          with summary.open('a') as file:
+              file.write('### Dump size before upload\n')
+              file.write(f'- Extracted files: {n_files}; total: {gib(size_total)}\n')
+              file.write(f'- LFS candidates: {n_lfs}; volume: {gib(size_lfs)}\n')
+          if os.environ.get('PUBLISH_PROVIDER') == 'github':
+              quota = float(os.environ.get('GITHUB_LFS_QUOTA_GIB', '10'))
+              if quota <= 0:
+                  raise SystemExit('GITHUB_LFS_QUOTA_GIB must be greater than 0')
+              if too_large:
+                  for filename, size in too_large[:12]:
+                      print(f'::error::GitHub Free LFS 2 GB/file limit: {filename}: {size} bytes')
+                  raise SystemExit('GitHub upload not attempted: a file exceeds 2 GB')
+              if size_lfs > quota * (1024**3):
+                  raise SystemExit(
+                      f'GitHub upload not attempted: {gib(size_lfs)} estimated LFS exceeds '
+                      f'{quota:g} GiB configured budget. Use Releases for large firmware assets '
+                      'or change GITHUB_LFS_QUOTA_GIB when your account has more capacity.'
+                  )
+              print('::notice::This check cannot know LFS storage already used by your account, '
+                    'and cannot guarantee GitHub will accept a large repository.')
+          PY_PREFLIGHT
+
+      - name: Create or resolve firmware dump repository
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
           set -euo pipefail
-          [[ -n "$GITLAB_TOKEN" ]] || { echo 'Missing GITLAB_TOKEN'; exit 1; }
+          [[ -n "$GITLAB_TOKEN" ]] || { echo '::error::GITLAB_TOKEN secret is required'; exit 1; }
           repo="android_dump_${BRAND}_${CODENAME}"
           api=https://gitlab.com/api/v4
           user_json="$(curl -fsS --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$api/user")"
           username="$(printf '%s' "$user_json" | python -c 'import sys,json; print(json.load(sys.stdin)["username"])')"
-          [[ -n "$username" ]] || { echo 'GitLab token did not return a username'; exit 1; }
           encoded="$(printf '%s' "$username/$repo" | python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
           status="$(curl -sS -o /dev/null -w '%{http_code}' \
             --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$api/projects/$encoded")"
@@ -432,23 +591,26 @@ jobs:
             echo "GitLab lookup failed (HTTP $status)"; exit 1
           fi
           {
-            echo "GITLAB_USERNAME=$username"
-            echo "GITLAB_PROJECT=$repo"
+            echo "PUBLISH_REMOTE=git@gitlab.com:$username/$repo.git"
+            echo "PUBLISH_WEB_URL=https://gitlab.com/$username/$repo"
+            echo "PUBLISH_BRANCH_URL=https://gitlab.com/$username/$repo/-/tree/$DUMP_BRANCH"
           } >> "$GITHUB_ENV"
-          echo "- GitLab project: https://gitlab.com/$username/$repo" >> "$GITHUB_STEP_SUMMARY"
+          echo "Repository: https://gitlab.com/$username/$repo"
 
-      - name: Upload firmware dump to GitLab over SSH
+      - name: Configure SSH for GitLab
         env:
           GITLAB_SSH_KEY: ${{ secrets.GITLAB_SSH_KEY }}
         run: |
           set -euo pipefail
-          [[ -n "$GITLAB_SSH_KEY" ]] || { echo 'Missing GITLAB_SSH_KEY'; exit 1; }
-          mkdir -p "$HOME/.ssh"
+          [[ -n "$GITLAB_SSH_KEY" ]] || { echo '::error::GITLAB_SSH_KEY secret is required'; exit 1; }
+          install -d -m 700 "$HOME/.ssh"
           printf '%s\n' "$GITLAB_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
           ssh-keyscan -H gitlab.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
 
-          rm -rf "$GITHUB_WORKSPACE/DumprX/input" "$GITHUB_WORKSPACE/DumprX/out/tmp"
+      - name: Upload firmware dump with Git and LFS
+        run: |
+          set -euo pipefail
           cd "$GITHUB_WORKSPACE/DumprX/out"
           rm -rf .git
           git init -b "$DUMP_BRANCH"
@@ -456,19 +618,18 @@ jobs:
           git config user.email "$GIT_AUTHOR_EMAIL"
           git config pack.threads 2
           git lfs install --local
-          git remote add origin "git@gitlab.com:${GITLAB_USERNAME}/${GITLAB_PROJECT}.git"
+          git remote add origin "$PUBLISH_REMOTE"
 
-          # Store files over 49 MiB through Git LFS before adding to Git.
-          # Avoid one huge initial Git push by committing each top-level dir.
+          # Always initialize LFS rules before staging firmware content.
           while IFS= read -r -d '' file; do
             git lfs track -- "$file"
           done < <(find . -type f -size +49M -not -path './.git/*' -printf '%P\0')
           touch .gitattributes
-          git add README.md .gitattributes
+          git add -- README.md .gitattributes
           git commit -m "Initialize firmware dump for $CODENAME"
 
-          # This workflow intentionally replaces its managed dump branch,
-          # but --force-with-lease protects against concurrent remote edits.
+          # Replace only the managed firmware branch, protecting concurrent edits.
+          # No uncontrolled --force is used.
           remote_line="$(git ls-remote --heads origin "refs/heads/$DUMP_BRANCH")"
           remote_oid="${remote_line%%$'\t'*}"
           if [[ -n "$remote_line" ]]; then
@@ -478,20 +639,59 @@ jobs:
             git push -u origin "HEAD:refs/heads/$DUMP_BRANCH"
           fi
 
-          while IFS= read -r -d '' dir; do
-            git add -A -- "$dir"
+          # GitHub enforces a 2 GiB push limit. Commit and upload in manageable
+          # batches within each top-level folder; also works the same on GitLab.
+          batch_limit=$((384 * 1024 * 1024))
+          batch_count=0
+          batch_bytes=0
+          batch_no=0
+          group_label=''
+          flush_batch() {
+            if (( batch_count == 0 )); then return 0; fi
             if ! git diff --cached --quiet; then
-              git commit -m "Import ${dir#./} for $CODENAME"
+              batch_no=$((batch_no + 1))
+              git commit -m "Import $group_label batch $batch_no for $CODENAME"
               git push origin "HEAD:refs/heads/$DUMP_BRANCH"
+              sleep "${PUSH_PAUSE_SECONDS:-10}"
             fi
-          done < <(find . -mindepth 1 -maxdepth 1 -type d ! -name .git -print0 | sort -z)
+            batch_count=0
+            batch_bytes=0
+          }
+          while IFS= read -r -d '' file; do
+            case "$file" in ./README.md|./.gitattributes) continue ;; esac
+            path="${file#./}"
+            if [[ "$path" == */* ]]; then top="${path%%/*}"; else top='root'; fi
+            if [[ "$top" != "$group_label" ]]; then
+              flush_batch
+              group_label="$top"
+              batch_no=0
+            fi
+            # stat follows no symbolic links: the staged symlink size is small.
+            size="$(stat -c %s -- "$file")"
+            if (( batch_count > 0 && (batch_bytes + size > batch_limit || batch_count >= 200) )); then
+              flush_batch
+            fi
+            git add -A -- "$file"
+            batch_count=$((batch_count + 1))
+            batch_bytes=$((batch_bytes + size))
+          done < <(find . -path './.git' -prune -o \
+            \( -type f -o -type l \) -print0 | sort -z)
+          flush_batch
 
+          # Catch .gitignore, deletions, or any other unstaged residual changes.
           git add -A
           if ! git diff --cached --quiet; then
             git commit -m "Complete firmware dump for $CODENAME"
             git push origin "HEAD:refs/heads/$DUMP_BRANCH"
           fi
-          echo "- GitLab branch: https://gitlab.com/$GITLAB_USERNAME/$GITLAB_PROJECT/-/tree/$DUMP_BRANCH" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Published firmware dump"
+            echo "- Provider: $PUBLISH_PROVIDER"
+            echo "- Repository: $PUBLISH_WEB_URL"
+            echo "- Branch: $PUBLISH_BRANCH_URL"
+            echo "- MediaTek (MTK) devices only"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload small firmware images (if available)
         if: always()
         uses: actions/upload-artifact@v4

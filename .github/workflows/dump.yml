@@ -1,6 +1,6 @@
 # WARNING: This workflow is intended only for MediaTek (MTK) firmware/devices.
 # It is not supported or validated for Qualcomm, Exynos, Unisoc, etc.
-name: Auto Firmware Dumper - MTK Only (GitHub Release)
+name: Auto Firmware Dumper - MTK Only (Git + Full Releases)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
         default: ''
         type: string
       CODE_NAME:
-        description: 'Device codename fallback (not model name)'
+        description: 'Actual MTK device codename override (e.g. LJ9); optional'
         required: false
         default: ''
         type: string
@@ -71,6 +71,10 @@ jobs:
       # Use the GitHub Actions bot no-reply address for every new commit.
       GIT_AUTHOR_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
       GIT_COMMITTER_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
+      PUBLISH_PROVIDER: github
+      PUSH_PAUSE_SECONDS: ${{ vars.DUMP_PUSH_PAUSE_SECONDS || '10' }}
+      GIT_TREE_BUDGET_MIB: ${{ vars.GIT_TREE_BUDGET_MIB || '384' }}
+      GIT_TREE_FILE_MAX_MIB: ${{ vars.GIT_TREE_FILE_MAX_MIB || '5' }}
       VENDOR_FALLBACK: ${{ inputs.VENDOR_NAME }}
       CODE_FALLBACK: ${{ inputs.CODE_NAME }}
       SEPOLICY_MODE: ${{ inputs.SEPOLICY_MODE }}
@@ -81,7 +85,7 @@ jobs:
       # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
       DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
       DUMPRX_REF: ${{ vars.DUMPRX_REF || '' }}
-      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/isus203/aospdtgen_mtk' }}
+      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/isus203/aospdtgen_mtk }}
       AOSPDTGEN_REF: ${{ vars.AOSPDTGEN_REF || '' }}
       SEPOLICY_DECOMPILER_REPO: ${{ vars.SEPOLICY_DECOMPILER_REPO || 'https://github.com/isus203/SELinux-CIL-Decompiler.git' }}
       SEPOLICY_DECOMPILER_REF: ${{ vars.SEPOLICY_DECOMPILER_REF || '' }}
@@ -115,6 +119,7 @@ jobs:
             flex git git-lfs gzip jq liblz4-tool lz4 m4 p7zip-full \
             python3-venv rsync tar unzip wget xz-utils zstd
           git lfs install --skip-repo
+          pip install gdown
           command -v gh >/dev/null || { echo 'GitHub CLI (gh) is missing'; exit 1; }
 
       - name: Free unused SDK disk space
@@ -163,7 +168,8 @@ jobs:
           cd DumprX
           # DumprX accepts direct links, Google Drive, AndroidFileHost, etc.
           # Do not force every downloaded firmware to be named firmware.zip.
-          bash dumper.sh "$FIRMWARE_URL"
+          gdown "$FIRMWARE_URL" -O firmware.zip
+          bash dumper.sh ./firmware.zip
           test -d out || { echo 'DumprX/out was not created'; exit 1; }
           if ! find out -type f -name 'build.prop' -print -quit | grep -q .; then
             echo 'No build.prop was found: firmware extraction may have failed'
@@ -192,9 +198,13 @@ jobs:
           brand="$(read_prop ro.product.manufacturer)"
           [[ -n "$brand" ]] || brand="$(read_prop ro.product.brand)"
           [[ -n "$brand" ]] || brand="$VENDOR_FALLBACK"
-          codename="$(read_prop ro.product.device)"
+          # Generic MTK system images often identify as mssi_*; prefer the
+          # actual device from the vendor partition or explicit CODE_NAME.
+          codename="$CODE_FALLBACK"
+          [[ -n "$codename" ]] || codename="$(read_prop ro.product.vendor.device)"
+          [[ -n "$codename" ]] || codename="$(read_prop ro.product.odm.device)"
+          [[ -n "$codename" ]] || codename="$(read_prop ro.product.device)"
           [[ -n "$codename" ]] || codename="$(read_prop ro.build.product)"
-          [[ -n "$codename" ]] || codename="$CODE_FALLBACK"
           version="$(read_prop ro.build.version.release)"
           [[ -n "$version" ]] || version="unknown"
           branch="$(read_prop ro.vendor.build.id)"
@@ -215,7 +225,7 @@ jobs:
             echo "ANDROID_VERSION=$version"
             echo "DUMP_BRANCH=$branch"
           } >> "$GITHUB_ENV"
-          printf 'Manufacturer: %s\nCodename: %s\nAndroid: %s\nGitLab branch: %s\n' \
+          printf 'Manufacturer: %s\nCodename: %s\nAndroid: %s\nDump branch: %s\n' \
             "$brand" "$codename" "$version" "$branch"
 
       - name: Cache SEPolicy compilers and platform sources
@@ -296,7 +306,7 @@ jobs:
           python -m aospdtgen --help >/dev/null
           printf 'aospdtgen commit: %s\n' "$(git -C "$src" rev-parse HEAD)"
           mkdir -p "$GITHUB_WORKSPACE/generated/lineage" \
-                   "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME"
+                   "$GITHUB_WORKSPACE/generated/android/device"
           python -m aospdtgen -o "$GITHUB_WORKSPACE/generated/lineage" "$GITHUB_WORKSPACE/DumprX/out"
           # New aospdtgen generates extract-files.py; older releases use .sh.
           # Some device trees have no proprietary-files list; BoardConfig.mk
@@ -304,8 +314,93 @@ jobs:
           test -f "$GITHUB_WORKSPACE/generated/lineage/BoardConfig.mk" || {
             echo 'aospdtgen produced no BoardConfig.mk'; exit 1;
           }
-          cp -a "$GITHUB_WORKSPACE/generated/lineage/." \
-            "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME/"
+          # aospdtgen may use a generic system device name for the output
+          # directory (mssi_64_64only_cn_armv82), while its generated extractor
+          # explicitly targets the actual device (e.g. device/tecno/LJ9).
+          # ExtractUtilsModule(device, vendor) is authoritative here.
+          python - <<'PY_TREE'
+          import ast
+          import os
+          import re
+          import shutil
+          from pathlib import Path
+
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          src = workspace / 'generated/lineage'
+          android = workspace / 'generated/android'
+          extractor = src / 'extract-files.py'
+          vendor_requested = os.environ.get('GENERATE_VENDOR') == 'true'
+
+          brand = os.environ['BRAND']
+          device = os.environ['CODENAME']
+          if extractor.is_file():
+              source = extractor.read_text(encoding='utf-8')
+              tree = ast.parse(source, filename=str(extractor))
+              constants = {}
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                      for target in node.targets:
+                          if isinstance(target, ast.Name):
+                              constants[target.id] = node.value.value
+
+              def string_value(node):
+                  if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                      return node.value
+                  if isinstance(node, ast.Name):
+                      value = constants.get(node.id)
+                      return value if isinstance(value, str) else None
+                  return None
+
+              modules = []
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.Call):
+                      continue
+                  name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, 'attr', None)
+                  if name != 'ExtractUtilsModule':
+                      continue
+                  args = [string_value(arg) for arg in node.args]
+                  kwargs = {k.arg: string_value(k.value) for k in node.keywords if k.arg}
+                  mod_device = args[0] if len(args) > 0 else kwargs.get('device') or kwargs.get('device_name')
+                  mod_vendor = args[1] if len(args) > 1 else kwargs.get('vendor')
+                  if mod_device and mod_vendor:
+                      modules.append((mod_vendor, mod_device))
+              modules = list(dict.fromkeys(modules))
+              if len(modules) != 1:
+                  if vendor_requested:
+                      raise SystemExit(
+                          f'::error::Cannot resolve a unique ExtractUtilsModule(device,vendor) in {extractor}: {modules}. '
+                          'Set CODE_NAME and use an aospdtgen version with a valid extract-files.py.'
+                      )
+                  print(f'::warning::Cannot resolve ExtractUtilsModule; using metadata {brand}/{device}')
+              else:
+                  brand, device = modules[0]
+          elif vendor_requested:
+              raise SystemExit('::error::aospdtgen generated no extract-files.py, cannot extract vendor blobs')
+
+          valid = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z')
+          for name, value in [('vendor', brand), ('device', device)]:
+              if not valid.fullmatch(value) or value in ('.', '..'):
+                  raise SystemExit(f'::error::Unsafe generated {name} identifier: {value!r}')
+
+          target = android / 'device' / brand / device
+          target.mkdir(parents=True, exist_ok=True)
+          shutil.copytree(src, target, dirs_exist_ok=True, symlinks=True)
+          if vendor_requested and not (target / 'proprietary-files.txt').is_file():
+              available = sorted(p.name for p in target.glob('*proprietary*'))
+              raise SystemExit(
+                  f'::error::Missing {target}/proprietary-files.txt; extractor expects this file. '
+                  f'Generated candidates: {available}. Check aospdtgen output before vendor extraction.'
+              )
+          if (brand, device) != (os.environ['BRAND'], os.environ['CODENAME']):
+              print(f'::warning::System build.prop reported {os.environ["BRAND"]}/{os.environ["CODENAME"]}, '
+                    f'but aospdtgen extractor targets {brand}/{device}; using extractor identity')
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as env:
+              env.write(f'TREE_BRAND={brand}\nTREE_CODENAME={device}\n')
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
+              summary.write(f'- Generated device tree: `device/{brand}/{device}`\n')
+          print('Device tree:', target)
+          print('Proprietary-files present:', (target / 'proprietary-files.txt').exists())
+          PY_TREE
 
       - name: Extract vendor tree (when requested)
         if: env.GENERATE_VENDOR == 'true'
@@ -319,7 +414,16 @@ jobs:
           git clone --depth 1 --branch "$EXTRACT_TOOLS_REF" \
             https://github.com/LineageOS/android_prebuilts_extract-tools.git \
             "$android/prebuilts/extract-tools"
-          cd "$android/device/$BRAND/$CODENAME"
+          # Use the identity declared in ExtractUtilsModule, not generic
+          # ro.product.device (e.g. mssi_64_64only_cn_armv82).
+          tree_brand="${TREE_BRAND:-$BRAND}"
+          tree_codename="${TREE_CODENAME:-$CODENAME}"
+          tree_dir="$android/device/$tree_brand/$tree_codename"
+          [[ -d "$tree_dir" ]] || { echo "::error::Device tree missing: $tree_dir"; exit 1; }
+          [[ -f "$tree_dir/proprietary-files.txt" ]] || {
+            echo "::error::Device tree missing proprietary-files.txt: $tree_dir"; exit 1;
+          }
+          cd "$tree_dir"
           if [[ -f extract-files.py ]]; then
             PYTHONPATH="$android/tools/extract-utils${PYTHONPATH:+:$PYTHONPATH}" \
               python extract-files.py "$GITHUB_WORKSPACE/DumprX/out"
@@ -329,8 +433,8 @@ jobs:
             echo '::error::The selected aospdtgen version produced no extract-files.py/sh'
             exit 1
           fi
-          [[ -d "$android/vendor/$BRAND/$CODENAME" ]] || {
-            echo 'Vendor extraction produced no vendor tree'; exit 1;
+          [[ -d "$android/vendor/$tree_brand/$tree_codename" ]] || {
+            echo "::error::Vendor extraction produced no vendor tree at vendor/$tree_brand/$tree_codename"; exit 1;
           }
 
       - name: Generate TWRP tree (when requested)
@@ -368,6 +472,8 @@ jobs:
           [[ -n "$GH_TOKEN" ]] || { echo 'GTOKEN secret is required to create tree repositories'; exit 1; }
           gh auth setup-git
           git_user="${USER_NAME:-github-actions[bot]}"
+          tree_brand="${TREE_BRAND:-$BRAND}"
+          tree_codename="${TREE_CODENAME:-$CODENAME}"
           publish_tree() {
             local source="$1" repo="$2" branch="$3"
             [[ -d "$source" ]] || { echo "Missing generated tree: $source"; return 1; }
@@ -389,12 +495,12 @@ jobs:
             echo "- [$repo](https://github.com/$TARGET_OWNER/$repo/tree/$branch)" >> "$GITHUB_STEP_SUMMARY"
           }
           if [[ "$GENERATE_VENDOR" == 'true' ]]; then
-            publish_tree "$GITHUB_WORKSPACE/generated/android/vendor/$BRAND/$CODENAME" \
-              "android_vendor_${BRAND}_${CODENAME}" "vendor-${CODENAME}-${GITHUB_RUN_ID}"
+            publish_tree "$GITHUB_WORKSPACE/generated/android/vendor/$tree_brand/$tree_codename" \
+              "android_vendor_${tree_brand}_${tree_codename}" "vendor-${tree_codename}-${GITHUB_RUN_ID}"
           fi
           if [[ "$UPLOAD_LINEAGE_DT" == 'true' ]]; then
-            publish_tree "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME" \
-              "lineage_device_${BRAND}_${CODENAME}" "lineage-${CODENAME}-${GITHUB_RUN_ID}"
+            publish_tree "$GITHUB_WORKSPACE/generated/android/device/$tree_brand/$tree_codename" \
+              "lineage_device_${tree_brand}_${tree_codename}" "lineage-${tree_codename}-${GITHUB_RUN_ID}"
           fi
           if [[ "$UPLOAD_TWRP_DT" == 'true' ]]; then
             mapfile -d '' trees < <(find "$GITHUB_WORKSPACE/generated/twrp/output" \
@@ -403,39 +509,265 @@ jobs:
               echo 'Cannot uniquely locate generated TWRP tree'; exit 1;
             }
             publish_tree "$(dirname "${trees[0]}")" \
-              "twrp_device_${BRAND}_${CODENAME}" "twrp-${CODENAME}-${GITHUB_RUN_ID}"
+              "twrp_device_${tree_brand}_${tree_codename}" "twrp-${tree_codename}-${GITHUB_RUN_ID}"
           fi
-      - name: Create GitHub release repository and archive
+      - name: Create or resolve firmware dump repository
         env:
           GH_TOKEN: ${{ secrets.GTOKEN }}
           TARGET_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          [[ -n "$GH_TOKEN" ]] || { echo 'Missing GTOKEN: repo creation requires a GitHub PAT'; exit 1; }
-          repo="dump_${BRAND}_${CODENAME}"
-          target="$TARGET_OWNER/$repo"
-          tag="dump-${CODENAME}-${GITHUB_RUN_ID}"
+          [[ -n "$GH_TOKEN" ]] || { echo '::error::GTOKEN secret is required'; exit 1; }
+          target="$TARGET_OWNER/android_dump_${BRAND}_${CODENAME}"
           if ! gh repo view "$target" >/dev/null 2>&1; then
-            gh repo create "$target" --public --add-readme \
-              --description="MediaTek (MTK) stock firmware dump for $BRAND $CODENAME"
+            gh repo create "$target" --public \
+              --description="MediaTek (MTK) firmware dump: Git index and complete release archives."
           fi
-          # Firmware input was already extracted. Optional tree generators ran
-          # before this step and no longer need DumprX/input.
+          gh auth setup-git
+          tag="dump-${CODENAME}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "PUBLISH_REMOTE=https://github.com/$target.git"
+            echo "PUBLISH_WEB_URL=https://github.com/$target"
+            echo "PUBLISH_BRANCH_URL=https://github.com/$target/tree/$DUMP_BRANCH"
+            echo "PUBLISH_RELEASE_TAG=$tag"
+            echo "PUBLISH_RELEASE_URL=https://github.com/$target/releases/tag/$tag"
+            echo "PUBLISH_TARGET=$target"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare compact Git tree and complete dump index
+        run: |
+          set -euo pipefail
+          python - <<'PY_PREPARE'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          work = Path(os.environ['GITHUB_WORKSPACE'])
+          dump = work / 'DumprX/out'
+          repo = work / 'work/github-dump-tree'
+          repo.mkdir(parents=True, exist_ok=True)
+          max_total = int(os.environ['GIT_TREE_BUDGET_MIB']) * 1024**2
+          max_file = int(os.environ['GIT_TREE_FILE_MAX_MIB']) * 1024**2
+          if not (32 * 1024**2 <= max_total <= 1024**3):
+              raise SystemExit('GIT_TREE_BUDGET_MIB must be between 32 and 1024')
+          if not (1024**2 <= max_file <= 20 * 1024**2):
+              raise SystemExit('GIT_TREE_FILE_MAX_MIB must be between 1 and 20 MiB')
+
+          candidates = []
+          total_size = 0
+          text_exts = {'.prop', '.xml', '.rc', '.te', '.cil', '.conf', '.json',
+                       '.txt', '.md', '.mk', '.sh', '.py', '.dts', '.dtsi',
+                       '.init', '.fstab', '.contexts', '.cfg', '.ini', '.bp',
+                       '.list', '.policy', '.csv', '.service', '.rules'}
+          special_names = {'file_contexts', 'property_contexts', 'service_contexts',
+                           'seapp_contexts', 'hwservice_contexts', 'genfs_contexts',
+                           'ueventd.rc', 'fstab', 'build.prop'}
+          for directory, dirs, names in os.walk(dump, followlinks=False):
+              dirs[:] = sorted(d for d in dirs if d not in {'.git', 'tmp'})
+              for name in names:
+                  path = Path(directory) / name
+                  if path.is_symlink() or not path.is_file():
+                      continue
+                  rel = path.relative_to(dump)
+                  try:
+                      size = path.stat().st_size
+                  except OSError:
+                      continue
+                  total_size += size
+                  if name == 'README.md' and rel.parent == Path('.'):
+                      continue
+                  is_metadata = name in special_names or path.suffix.lower() in text_exts
+                  # The Git view contains useful browseable text files only.
+                  if not is_metadata or size > max_file:
+                      continue
+                  if str(rel).startswith('selinux/decompiled/'):
+                      priority = 0
+                  elif name in special_names or name.endswith('.prop'):
+                      priority = 1
+                  else:
+                      priority = 2
+                  candidates.append((priority, str(rel), size, path))
+
+          selected = {}
+          chosen_bytes = 0
+          for priority, rel, size, path in sorted(candidates):
+              if chosen_bytes + size > max_total:
+                  continue
+              selected[rel] = size
+              chosen_bytes += size
+              target = repo / rel
+              target.parent.mkdir(parents=True, exist_ok=True)
+              try:
+                  os.link(path, target)
+              except OSError:
+                  shutil.copy2(path, target)
+
+          all_files = []
+          for directory, dirs, names in os.walk(dump, followlinks=False):
+              dirs[:] = sorted(d for d in dirs if d not in {'.git', 'tmp'})
+              for name in sorted(names):
+                  path = Path(directory) / name
+                  rel = path.relative_to(dump)
+                  if path.is_symlink():
+                      all_files.append((str(rel), -1, 'archive'))
+                  elif path.is_file():
+                      all_files.append((str(rel), path.stat().st_size,
+                                        'git+archive' if str(rel) in selected else 'archive'))
+          with (repo / 'DUMP_INDEX.tsv').open('w', encoding='utf-8') as out:
+              out.write('path\tsize_bytes\tlocation\n')
+              for rel, size, loc in sorted(all_files):
+                  clean = rel.replace('\\', '\\\\').replace('\t', '\\t').replace('\n', '\\n')
+                  out.write(f'{clean}\t{size}\t{loc}\n')
+
+          # Preserve the DumprX README and link the complete dump archive.
+          original = (dump / 'README.md').read_text(errors='replace') if (dump / 'README.md').exists() else ''
+          release = os.environ['PUBLISH_RELEASE_URL']
+          note = (
+              '\n## Complete firmware download\n\n'
+              f'**Full firmware dump:** {release}\n\n'
+              'The Git branch is a compact text-file browsing view, not the full dump. '
+              'All original files are included in the split 7z release archive. '
+              'Download every `.7z.NNN` file and extract from `.7z.001` using 7-Zip. '
+              'See `DUMP_INDEX.tsv` for the per-file index.\n'
+              '\n**WARNING: MediaTek (MTK) devices only.**\n'
+          )
+          (repo / 'README.md').write_text(original + note, encoding='utf-8')
+          with (repo / 'SELECTED_PATHS.txt').open('w', encoding='utf-8') as out:
+              out.write('\n'.join(sorted(selected)) + '\n')
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          with summary.open('a', encoding='utf-8') as out:
+              out.write('## Hybrid 14 GB-friendly publishing\n')
+              out.write(f'- Extracted regular files: {total_size / 1024**3:.2f} GiB\n')
+              out.write(f'- Git browsing view: {len(selected)} files / {chosen_bytes / 1024**2:.2f} MiB\n')
+              out.write(f'- Complete files are archived in: {release}\n')
+          print(f'Complete dump: {total_size / 1024**3:.2f} GiB')
+          print(f'Git browsing view: {len(selected)} files; {chosen_bytes / 1024**2:.2f} MiB')
+          PY_PREPARE
+
+      - name: Push browsable Git index in small commits
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/work/github-dump-tree"
+          # Never initialize Git in DumprX/out; full files stay available for 7z.
+          rm -rf .git
+          git init -b "$DUMP_BRANCH"
+          git config user.name "${USER_NAME:-github-actions[bot]}"
+          git config user.email "$GIT_AUTHOR_EMAIL"
+          git config pack.threads 2
+          git remote add origin "$PUBLISH_REMOTE"
+          git add -- README.md DUMP_INDEX.tsv SELECTED_PATHS.txt
+          git commit -m "Initialize firmware dump for $CODENAME"
+
+          # Replace only the managed dump branch; do not overwrite other branches.
+          remote_line="$(git ls-remote --heads origin "refs/heads/$DUMP_BRANCH")"
+          remote_oid="${remote_line%%$'\\t'*}"
+          if [[ -n "$remote_line" ]]; then
+            git push --force-with-lease="refs/heads/$DUMP_BRANCH:$remote_oid" \
+              -u origin "HEAD:refs/heads/$DUMP_BRANCH"
+          else
+            git push -u origin "HEAD:refs/heads/$DUMP_BRANCH"
+          fi
+
+          # Up to 128 MiB per commit, preserving the directory-oriented history.
+          batch_limit=$((128 * 1024 * 1024))
+          batch_bytes=0
+          batch_count=0
+          batch_no=0
+          group_label=''
+          flush_batch() {
+            if (( batch_count == 0 )); then return 0; fi
+            if ! git diff --cached --quiet; then
+              batch_no=$((batch_no + 1))
+              git commit -m "Import $group_label batch $batch_no for $CODENAME"
+              git push origin "HEAD:refs/heads/$DUMP_BRANCH"
+              sleep "${PUSH_PAUSE_SECONDS:-10}"
+            fi
+            batch_bytes=0
+            batch_count=0
+          }
+          while IFS= read -r -d '' file; do
+            rel="${file#./}"
+            case "$rel" in README.md|DUMP_INDEX.tsv|SELECTED_PATHS.txt) continue ;; esac
+            if [[ "$rel" == */* ]]; then top="${rel%%/*}"; else top='root'; fi
+            if [[ "$top" != "$group_label" ]]; then
+              flush_batch
+              group_label="$top"
+              batch_no=0
+            fi
+            bytes="$(stat -c %s -- "$file")"
+            if (( batch_count > 0 && (batch_bytes + bytes > batch_limit || batch_count >= 200) )); then
+              flush_batch
+            fi
+            git add -f -- "$file"
+            batch_count=$((batch_count + 1))
+            batch_bytes=$((batch_bytes + bytes))
+          done < <(find . -path './.git' -prune -o -type f -print0 | sort -z)
+          flush_batch
+          {
+            echo "### GitHub browsable tree"
+            echo "- $PUBLISH_BRANCH_URL"
+            echo "- Git view deliberately excludes large firmware binaries"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create split 7z archive of the FULL firmware dump
+        run: |
+          set -euo pipefail
           rm -rf "$GITHUB_WORKSPACE/DumprX/input" "$GITHUB_WORKSPACE/DumprX/out/tmp"
           mkdir -p "$GITHUB_WORKSPACE/releases"
-          archive="$GITHUB_WORKSPACE/releases/full_dump_${CODENAME}_${GITHUB_RUN_ID}.7z"
-          ( cd "$GITHUB_WORKSPACE/DumprX/out" && \
-            7z a -t7z -mx=1 -v1900m "$archive" . -xr!.git -xr!tmp )
+          archive="$GITHUB_WORKSPACE/releases/full_dump_${CODENAME}_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.7z"
+          dump="$GITHUB_WORKSPACE/DumprX/out"
+          # Keep the complete dump (including binaries) in these archives.
+          # Volumes are under GitHub's 2 GiB per-release-asset limit.
+          # A separate copy of the whole dump is NOT staged for Git.
+          df -h "$GITHUB_WORKSPACE"
+          (
+            cd "$dump"
+            7z a -t7z -mx=1 -v1800m "$archive" .
+          )
           shopt -s nullglob
           chunks=( "$archive".* )
-          [[ "${#chunks[@]}" -gt 0 ]] || { echo '7z did not produce release volumes'; exit 1; }
-          sha256sum "${chunks[@]}" > "$GITHUB_WORKSPACE/releases/SHA256SUMS.txt"
-          gh release create "$tag" "${chunks[@]}" "$GITHUB_WORKSPACE/releases/SHA256SUMS.txt" \
-            --repo "$target" --title="Full dump $BRAND $CODENAME ($ANDROID_VERSION)" \
-            --notes="WARNING: MediaTek (MTK) firmware only; other chipsets are not supported/validated. DumprX dump with optional SELinux decompilation. Check SHA256SUMS.txt after downloading all 7z volumes." \
-            --target="$(gh api "repos/$target" --jq .default_branch)"
-          echo "### GitHub dump" >> "$GITHUB_STEP_SUMMARY"
-          echo "- https://github.com/$target/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
+          (( ${#chunks[@]} > 0 )) || { echo '::error::No 7z volumes produced'; exit 1; }
+          ( cd "$GITHUB_WORKSPACE/releases" && sha256sum full_dump_*.7z.* > SHA256SUMS.txt )
+          (
+            cd "$GITHUB_WORKSPACE/releases"
+            7z t "$(basename "$archive").001" >/dev/null
+          )
+          {
+            echo "### Full firmware archive"
+            echo "- Archive volumes: ${#chunks[@]}"
+            echo "- Release: $PUBLISH_RELEASE_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish full dump in GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GTOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$PUBLISH_RELEASE_TAG"
+          target="$PUBLISH_TARGET"
+          gh release create "$tag" --draft --repo "$target" --target "$DUMP_BRANCH" \
+            --title "Full MTK firmware dump $BRAND $CODENAME ($ANDROID_VERSION)" \
+            --notes "Complete firmware dump in numbered 7z volumes. Download every .7z.NNN file, verify SHA256SUMS.txt, then extract .7z.001 with 7-Zip. WARNING: MediaTek (MTK) devices only."
+          shopt -s nullglob
+          volumes=( "$GITHUB_WORKSPACE"/releases/full_dump_*.7z.* )
+          (( ${#volumes[@]} > 0 )) || { echo '::error::No release volumes to upload'; exit 1; }
+          for part in "${volumes[@]}" "$GITHUB_WORKSPACE/releases/SHA256SUMS.txt"; do
+            ok=0
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "$part" --repo "$target" --clobber; then
+                ok=1
+                break
+              fi
+              echo "::warning::Release upload failed for $(basename "$part"), retry $attempt/3"
+              sleep $(( attempt * 20 ))
+            done
+            (( ok == 1 )) || { echo "::error::Release asset upload failed: $part"; exit 1; }
+          done
+          # Publish only after every volume and checksum asset is uploaded.
+          gh release edit "$tag" --repo "$target" --draft=false
+          echo "- Full download: $PUBLISH_RELEASE_URL" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload small firmware images (if available)
         if: always()
         uses: actions/upload-artifact@v4
