@@ -11,7 +11,7 @@ on:
         default: 'isus203'
         type: string
       FIRMWARE_URL:
-        description: 'MTK/MediaTek firmware ONLY - URL supported by DumprX'
+        description: 'MediaTek (MTK) ZIP on Google Drive; downloaded with gdown'
         required: true
         type: string
       VENDOR_NAME:
@@ -25,15 +25,15 @@ on:
         default: ''
         type: string
       GENERATE_VENDOR:
-        description: 'Generate and publish vendor tree to GitHub'
+        description: 'Generate and publish vendor tree to GitLab'
         type: boolean
         default: false
       UPLOAD_LINEAGE_DT:
-        description: 'Generate and publish LineageOS device tree to GitHub'
+        description: 'Generate and publish LineageOS device tree to GitLab'
         type: boolean
         default: false
       UPLOAD_TWRP_DT:
-        description: 'Generate and publish experimental TWRP tree to GitHub'
+        description: 'Generate and publish experimental TWRP tree to GitLab'
         type: boolean
         default: false
       SEPOLICY_MODE:
@@ -73,7 +73,6 @@ jobs:
       GIT_COMMITTER_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
       PUBLISH_PROVIDER: gitlab
       PUSH_PAUSE_SECONDS: ${{ vars.DUMP_PUSH_PAUSE_SECONDS || '10' }}
-      GITHUB_LFS_QUOTA_GIB: ${{ vars.GITHUB_LFS_QUOTA_GIB || '10' }}
       VENDOR_FALLBACK: ${{ inputs.VENDOR_NAME }}
       CODE_FALLBACK: ${{ inputs.CODE_NAME }}
       SEPOLICY_MODE: ${{ inputs.SEPOLICY_MODE }}
@@ -84,7 +83,7 @@ jobs:
       # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
       DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
       DUMPRX_REF: ${{ vars.DUMPRX_REF || '' }}
-      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/isus203/aospdtgen_mtk' }}
+      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/isus203/aospdtgen_mtk.git' }}
       AOSPDTGEN_REF: ${{ vars.AOSPDTGEN_REF || '' }}
       SEPOLICY_DECOMPILER_REPO: ${{ vars.SEPOLICY_DECOMPILER_REPO || 'https://github.com/isus203/SELinux-CIL-Decompiler.git' }}
       SEPOLICY_DECOMPILER_REF: ${{ vars.SEPOLICY_DECOMPILER_REF || '' }}
@@ -118,8 +117,7 @@ jobs:
             flex git git-lfs gzip jq liblz4-tool lz4 m4 p7zip-full \
             python3-venv rsync tar unzip wget xz-utils zstd
           git lfs install --skip-repo
-          pip install gdown
-          command -v gh >/dev/null || { echo 'GitHub CLI (gh) is missing'; exit 1; }
+          python -m pip install --upgrade gdown
 
       - name: Free unused SDK disk space
         run: |
@@ -161,20 +159,26 @@ jobs:
           bash -n "$dest/decompile.sh"
           printf 'SELinux decompiler commit: %s\n' "$(git -C "$dest" rev-parse HEAD)"
 
-      - name: Download and unpack firmware with DumprX
+      - name: Download firmware.zip with gdown and unpack using DumprX
         run: |
           set -euo pipefail
-          cd DumprX
-          # DumprX accepts direct links, Google Drive, AndroidFileHost, etc.
-          # Do not force every downloaded firmware to be named firmware.zip.
+          cd "$GITHUB_WORKSPACE/DumprX"
+          [[ -n "$FIRMWARE_URL" ]] || { echo '::error::FIRMWARE_URL is empty'; exit 1; }
+          # Requested Google Drive download path (not DumprX URL downloader).
           gdown "$FIRMWARE_URL" -O firmware.zip
+          [[ -s firmware.zip ]] || { echo '::error::gdown did not create firmware.zip'; exit 1; }
+          echo "Downloaded firmware size: $(du -h firmware.zip | cut -f1)"
           bash dumper.sh ./firmware.zip
-          test -d out || { echo 'DumprX/out was not created'; exit 1; }
-          if ! find out -type f -name 'build.prop' -print -quit | grep -q .; then
-            echo 'No build.prop was found: firmware extraction may have failed'
+          [[ -d out ]] || { echo '::error::DumprX/out was not created'; exit 1; }
+          if ! find out -type f -name build.prop -print -quit | grep -q .; then
+            echo '::error::No build.prop found in extracted firmware'
             exit 1
           fi
           sudo chown -R "$(id -u):$(id -g)" out
+          # A ~14 GB downloaded ZIP otherwise competes with the extracted dump
+          # and the GitHub Release archive for the runner's limited disk space.
+          rm -f -- firmware.zip
+          df -h "$GITHUB_WORKSPACE"
 
       - name: Read device metadata
         run: |
@@ -306,7 +310,12 @@ jobs:
           printf 'aospdtgen commit: %s\n' "$(git -C "$src" rev-parse HEAD)"
           mkdir -p "$GITHUB_WORKSPACE/generated/lineage" \
                    "$GITHUB_WORKSPACE/generated/android/device"
-          python -m aospdtgen -o "$GITHUB_WORKSPACE/generated/lineage" "$GITHUB_WORKSPACE/DumprX/out"
+          # This MTK fork supports explicit real device/vendor overrides.
+          # Example: LJ9 instead of mssi_64_64only_cn_armv82.
+          gen_args=(-o "$GITHUB_WORKSPACE/generated/lineage")
+          [[ -n "$CODE_FALLBACK" ]] && gen_args+=(--codename "$CODE_FALLBACK")
+          [[ -n "$VENDOR_FALLBACK" ]] && gen_args+=(--vendor "$VENDOR_FALLBACK")
+          python -m aospdtgen "${gen_args[@]}" "$GITHUB_WORKSPACE/DumprX/out"
           # New aospdtgen generates extract-files.py; older releases use .sh.
           # Some device trees have no proprietary-files list; BoardConfig.mk
           # is a more reliable marker of a successfully generated tree.
@@ -461,55 +470,6 @@ jobs:
             echo 'TWRP generator did not produce an output directory'; exit 1;
           }
 
-      - name: Publish optional trees to GitHub
-        if: env.GENERATE_VENDOR == 'true' || env.UPLOAD_LINEAGE_DT == 'true' || env.UPLOAD_TWRP_DT == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GTOKEN }}
-          TARGET_OWNER: ${{ github.repository_owner }}
-        run: |
-          set -euo pipefail
-          [[ -n "$GH_TOKEN" ]] || { echo 'GTOKEN secret is required to create tree repositories'; exit 1; }
-          gh auth setup-git
-          git_user="${USER_NAME:-github-actions[bot]}"
-          tree_brand="${TREE_BRAND:-$BRAND}"
-          tree_codename="${TREE_CODENAME:-$CODENAME}"
-          publish_tree() {
-            local source="$1" repo="$2" branch="$3"
-            [[ -d "$source" ]] || { echo "Missing generated tree: $source"; return 1; }
-            if ! gh repo view "$TARGET_OWNER/$repo" >/dev/null 2>&1; then
-              gh repo create "$TARGET_OWNER/$repo" --public --description="Generated firmware tree for $CODENAME"
-            fi
-            (
-              cd "$source"
-              rm -rf .git
-              git init -b "$branch"
-              git config user.name "$git_user"
-              git config user.email "$GIT_AUTHOR_EMAIL"
-              git add -A
-              git diff --cached --quiet && { echo "No files in $repo"; exit 1; }
-              git commit -m "Auto-generated tree for $CODENAME"
-              git remote add origin "https://github.com/$TARGET_OWNER/$repo.git"
-              git push -u origin "$branch"
-            )
-            echo "- [$repo](https://github.com/$TARGET_OWNER/$repo/tree/$branch)" >> "$GITHUB_STEP_SUMMARY"
-          }
-          if [[ "$GENERATE_VENDOR" == 'true' ]]; then
-            publish_tree "$GITHUB_WORKSPACE/generated/android/vendor/$tree_brand/$tree_codename" \
-              "android_vendor_${tree_brand}_${tree_codename}" "vendor-${tree_codename}-${GITHUB_RUN_ID}"
-          fi
-          if [[ "$UPLOAD_LINEAGE_DT" == 'true' ]]; then
-            publish_tree "$GITHUB_WORKSPACE/generated/android/device/$tree_brand/$tree_codename" \
-              "lineage_device_${tree_brand}_${tree_codename}" "lineage-${tree_codename}-${GITHUB_RUN_ID}"
-          fi
-          if [[ "$UPLOAD_TWRP_DT" == 'true' ]]; then
-            mapfile -d '' trees < <(find "$GITHUB_WORKSPACE/generated/twrp/output" \
-              -type f -name BoardConfig.mk -print0)
-            [[ "${#trees[@]}" -eq 1 ]] || {
-              echo 'Cannot uniquely locate generated TWRP tree'; exit 1;
-            }
-            publish_tree "$(dirname "${trees[0]}")" \
-              "twrp_device_${tree_brand}_${tree_codename}" "twrp-${tree_codename}-${GITHUB_RUN_ID}"
-          fi
       - name: Preflight Git and LFS sizes
         run: |
           set -euo pipefail
@@ -591,6 +551,7 @@ jobs:
             echo "GitLab lookup failed (HTTP $status)"; exit 1
           fi
           {
+            echo "GITLAB_USERNAME=$username"
             echo "PUBLISH_REMOTE=git@gitlab.com:$username/$repo.git"
             echo "PUBLISH_WEB_URL=https://gitlab.com/$username/$repo"
             echo "PUBLISH_BRANCH_URL=https://gitlab.com/$username/$repo/-/tree/$DUMP_BRANCH"
@@ -607,6 +568,71 @@ jobs:
           printf '%s\n' "$GITLAB_SSH_KEY" > "$HOME/.ssh/id_ed25519"
           chmod 600 "$HOME/.ssh/id_ed25519"
           ssh-keyscan -H gitlab.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+
+      - name: Publish optional device trees to GitLab
+        if: env.GENERATE_VENDOR == 'true' || env.UPLOAD_LINEAGE_DT == 'true' || env.UPLOAD_TWRP_DT == 'true'
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "${GITLAB_TOKEN:-}" ]] || { echo '::error::Missing GITLAB_TOKEN'; exit 1; }
+          [[ -n "${GITLAB_USERNAME:-}" ]] || { echo '::error::No GitLab username; check repository preparation'; exit 1; }
+          tree_brand="${TREE_BRAND:-$BRAND}"
+          tree_codename="${TREE_CODENAME:-$CODENAME}"
+          api='https://gitlab.com/api/v4'
+          publish_tree() {
+            local source="$1" repo="$2" branch="$3"
+            [[ -d "$source" ]] || { echo "::error::Missing generated tree: $source"; return 1; }
+            local encoded status
+            encoded="$(printf '%s' "${GITLAB_USERNAME}/${repo}" | python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(),safe=""))')"
+            status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$api/projects/$encoded")"
+            case "$status" in
+              200) echo "GitLab tree repository already exists: $repo" ;;
+              404)
+                curl --fail-with-body -fsS --request POST \
+                  --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                  --data-urlencode "name=$repo" \
+                  --data-urlencode "path=$repo" \
+                  --data-urlencode 'visibility=public' \
+                  --data-urlencode "description=MediaTek (MTK) device tree for $tree_codename" \
+                  "$api/projects" >/dev/null ;;
+              *) echo "::error::GitLab tree repository lookup returned HTTP $status for $repo"; return 1 ;;
+            esac
+            (
+              cd "$source"
+              rm -rf .git
+              git init -b "$branch"
+              git config user.name "${USER_NAME:-github-actions[bot]}"
+              git config user.email "$GIT_AUTHOR_EMAIL"
+              git add -A
+              if git diff --cached --quiet; then
+                echo "::error::No generated files to publish in $source"
+                exit 1
+              fi
+              git commit -m "Auto-generated MTK tree for $tree_codename"
+              git remote add origin "git@gitlab.com:${GITLAB_USERNAME}/${repo}.git"
+              git push -u origin "HEAD:refs/heads/$branch"
+            )
+            echo "- [$repo](https://gitlab.com/$GITLAB_USERNAME/$repo/-/tree/$branch)" >> "$GITHUB_STEP_SUMMARY"
+          }
+          if [[ "$GENERATE_VENDOR" == 'true' ]]; then
+            publish_tree "$GITHUB_WORKSPACE/generated/android/vendor/$tree_brand/$tree_codename" \
+              "android_vendor_${tree_brand}_${tree_codename}" "vendor-${tree_codename}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          if [[ "$UPLOAD_LINEAGE_DT" == 'true' ]]; then
+            publish_tree "$GITHUB_WORKSPACE/generated/android/device/$tree_brand/$tree_codename" \
+              "lineage_device_${tree_brand}_${tree_codename}" "lineage-${tree_codename}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          if [[ "$UPLOAD_TWRP_DT" == 'true' ]]; then
+            mapfile -d '' trees < <(find "$GITHUB_WORKSPACE/generated/twrp/output" \
+              -type f -name BoardConfig.mk -print0)
+            [[ "${#trees[@]}" -eq 1 ]] || {
+              echo '::error::Cannot uniquely locate generated TWRP tree'; exit 1;
+            }
+            publish_tree "$(dirname "${trees[0]}")" \
+              "twrp_device_${tree_brand}_${tree_codename}" "twrp-${tree_codename}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
 
       - name: Upload firmware dump with Git and LFS
         run: |

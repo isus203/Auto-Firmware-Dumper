@@ -11,7 +11,7 @@ on:
         default: 'isus203'
         type: string
       FIRMWARE_URL:
-        description: 'MTK/MediaTek firmware ONLY - URL supported by DumprX'
+        description: 'MediaTek (MTK) ZIP on Google Drive; downloaded with gdown'
         required: true
         type: string
       VENDOR_NAME:
@@ -85,7 +85,7 @@ jobs:
       # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
       DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
       DUMPRX_REF: ${{ vars.DUMPRX_REF || '' }}
-      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/isus203/aospdtgen_mtk' }}
+      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/isus203/aospdtgen_mtk.git' }}
       AOSPDTGEN_REF: ${{ vars.AOSPDTGEN_REF || '' }}
       SEPOLICY_DECOMPILER_REPO: ${{ vars.SEPOLICY_DECOMPILER_REPO || 'https://github.com/isus203/SELinux-CIL-Decompiler.git' }}
       SEPOLICY_DECOMPILER_REF: ${{ vars.SEPOLICY_DECOMPILER_REF || '' }}
@@ -110,6 +110,25 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Validate GitHub publishing credentials
+        if: env.PUBLISH_PROVIDER == 'github' || env.GENERATE_VENDOR == 'true' || env.UPLOAD_LINEAGE_DT == 'true' || env.UPLOAD_TWRP_DT == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GTOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo '::error title=Missing GTOKEN::Set a valid GitHub Personal Access Token in Settings > Secrets and variables > Actions > Secrets > GTOKEN. The workflow must create and push to other repositories.'
+            exit 1
+          fi
+          # GH_TOKEN is consumed directly by GitHub CLI. Do not run gh auth login
+          # or display the token in logs.
+          if ! login="$(gh api user --jq '.login' 2>/dev/null)" || [[ -z "$login" ]]; then
+            echo '::error title=Invalid GTOKEN (HTTP 401)::GitHub rejected GTOKEN. Replace the expired/revoked/incorrect token in Actions Secrets; gh auth login on the runner does not fix an invalid secret.'
+            exit 1
+          fi
+          echo "GitHub authenticated as: $login"
+          echo 'GitHub API credentials: valid (repository permissions still checked when publishing).'
+
       - name: Install host prerequisites
         run: |
           set -euo pipefail
@@ -119,7 +138,7 @@ jobs:
             flex git git-lfs gzip jq liblz4-tool lz4 m4 p7zip-full \
             python3-venv rsync tar unzip wget xz-utils zstd
           git lfs install --skip-repo
-          pip install gdown
+          python -m pip install --upgrade gdown
           command -v gh >/dev/null || { echo 'GitHub CLI (gh) is missing'; exit 1; }
 
       - name: Free unused SDK disk space
@@ -162,20 +181,26 @@ jobs:
           bash -n "$dest/decompile.sh"
           printf 'SELinux decompiler commit: %s\n' "$(git -C "$dest" rev-parse HEAD)"
 
-      - name: Download and unpack firmware with DumprX
+      - name: Download firmware.zip with gdown and unpack using DumprX
         run: |
           set -euo pipefail
-          cd DumprX
-          # DumprX accepts direct links, Google Drive, AndroidFileHost, etc.
-          # Do not force every downloaded firmware to be named firmware.zip.
+          cd "$GITHUB_WORKSPACE/DumprX"
+          [[ -n "$FIRMWARE_URL" ]] || { echo '::error::FIRMWARE_URL is empty'; exit 1; }
+          # Requested Google Drive download path (not DumprX URL downloader).
           gdown "$FIRMWARE_URL" -O firmware.zip
+          [[ -s firmware.zip ]] || { echo '::error::gdown did not create firmware.zip'; exit 1; }
+          echo "Downloaded firmware size: $(du -h firmware.zip | cut -f1)"
           bash dumper.sh ./firmware.zip
-          test -d out || { echo 'DumprX/out was not created'; exit 1; }
-          if ! find out -type f -name 'build.prop' -print -quit | grep -q .; then
-            echo 'No build.prop was found: firmware extraction may have failed'
+          [[ -d out ]] || { echo '::error::DumprX/out was not created'; exit 1; }
+          if ! find out -type f -name build.prop -print -quit | grep -q .; then
+            echo '::error::No build.prop found in extracted firmware'
             exit 1
           fi
           sudo chown -R "$(id -u):$(id -g)" out
+          # A ~14 GB downloaded ZIP otherwise competes with the extracted dump
+          # and the GitHub Release archive for the runner's limited disk space.
+          rm -f -- firmware.zip
+          df -h "$GITHUB_WORKSPACE"
 
       - name: Read device metadata
         run: |
@@ -307,7 +332,12 @@ jobs:
           printf 'aospdtgen commit: %s\n' "$(git -C "$src" rev-parse HEAD)"
           mkdir -p "$GITHUB_WORKSPACE/generated/lineage" \
                    "$GITHUB_WORKSPACE/generated/android/device"
-          python -m aospdtgen -o "$GITHUB_WORKSPACE/generated/lineage" "$GITHUB_WORKSPACE/DumprX/out"
+          # This MTK fork supports explicit real device/vendor overrides.
+          # Example: LJ9 instead of mssi_64_64only_cn_armv82.
+          gen_args=(-o "$GITHUB_WORKSPACE/generated/lineage")
+          [[ -n "$CODE_FALLBACK" ]] && gen_args+=(--codename "$CODE_FALLBACK")
+          [[ -n "$VENDOR_FALLBACK" ]] && gen_args+=(--vendor "$VENDOR_FALLBACK")
+          python -m aospdtgen "${gen_args[@]}" "$GITHUB_WORKSPACE/DumprX/out"
           # New aospdtgen generates extract-files.py; older releases use .sh.
           # Some device trees have no proprietary-files list; BoardConfig.mk
           # is a more reliable marker of a successfully generated tree.
