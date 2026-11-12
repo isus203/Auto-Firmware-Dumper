@@ -1,292 +1,451 @@
-name: Auto Firmware Dumper
+# WARNING: This workflow is intended only for MediaTek (MTK) firmware/devices.
+# It is not supported or validated for Qualcomm, Exynos, Unisoc, etc.
+name: Auto Firmware Dumper - MTK Only (GitHub Release)
 
 on:
   workflow_dispatch:
     inputs:
       USER_NAME:
-        description: 'Name of your GitHub Account'
+        description: 'Git author name'
         required: true
         default: 'isus203'
-      USER_EMAIL:
-        description: 'E-mail of your GitHub Account'
-        required: true
-        default: ''
+        type: string
       FIRMWARE_URL:
-        description: 'Stock ROM Link Google Drive '
+        description: 'MTK/MediaTek firmware ONLY - URL supported by DumprX'
         required: true
-        default: ''
+        type: string
       VENDOR_NAME:
-        description: 'Device manufacturer'
-        required: true
+        description: 'Manufacturer fallback when build.prop is missing'
+        required: false
         default: ''
+        type: string
       CODE_NAME:
-        description: 'Code name '
-        required: true
+        description: 'Device codename fallback (not model name)'
+        required: false
         default: ''
+        type: string
       GENERATE_VENDOR:
-        description: 'Create Vendor Tree'
-        required: true
-        default: 'false'
+        description: 'Generate and publish vendor tree to GitHub'
         type: boolean
+        default: false
       UPLOAD_LINEAGE_DT:
-        description: 'Upload LineageOS tree'
-        required: true
-        default: 'false'
+        description: 'Generate and publish LineageOS device tree to GitHub'
         type: boolean
+        default: false
       UPLOAD_TWRP_DT:
-        description: 'Upload TWRP tree'
-        required: true
-        default: 'false'
+        description: 'Generate and publish experimental TWRP tree to GitHub'
         type: boolean
+        default: false
+      SEPOLICY_MODE:
+        description: 'SELinux mode: versioned API, current macros, or disabled'
+        type: choice
+        options:
+          - 'prebuilt'
+          - 'current'
+          - 'disabled'
+        default: 'prebuilt'
+      SEPOLICY_BRANCH:
+        description: 'LineageOS android_system_sepolicy branch'
+        type: string
+        default: 'lineage-23.2'
+
+concurrency:
+  group: dumper-github-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   dump:
-    name: Auto Firmware Dumper
+    name: MediaTek (MTK) dump, decompile and publish
+    # Same repository-owner protection as the existing workflows.
     if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.GTOKEN }}
-      TWT: ${{ github.event.inputs.UPLOAD_TWRP_DT }}
-      LOT: ${{ github.event.inputs.UPLOAD_LINEAGE_DT }}
-      GVT: ${{ github.event.inputs.GENERATE_VENDOR }}
-      FUR: ${{ github.event.inputs.FIRMWARE_URL }}
-      VENDOR: ${{ github.event.inputs.VENDOR_NAME }}
-      CODE: ${{ github.event.inputs.CODE_NAME }}
-      UN: ${{ github.event.inputs.USER_NAME }}
-      UEM: ${{ github.event.inputs.USER_EMAIL }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
     permissions:
-      contents: write
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      FIRMWARE_URL: ${{ inputs.FIRMWARE_URL }}
+      USER_NAME: ${{ inputs.USER_NAME }}
+      # Use the GitHub Actions bot no-reply address for every new commit.
+      GIT_AUTHOR_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
+      GIT_COMMITTER_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
+      VENDOR_FALLBACK: ${{ inputs.VENDOR_NAME }}
+      CODE_FALLBACK: ${{ inputs.CODE_NAME }}
+      SEPOLICY_MODE: ${{ inputs.SEPOLICY_MODE }}
+      SEPOLICY_BRANCH: ${{ inputs.SEPOLICY_BRANCH }}
+      GENERATE_VENDOR: ${{ inputs.GENERATE_VENDOR }}
+      UPLOAD_LINEAGE_DT: ${{ inputs.UPLOAD_LINEAGE_DT }}
+      UPLOAD_TWRP_DT: ${{ inputs.UPLOAD_TWRP_DT }}
+      # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
+      DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
+      DUMPRX_REF: ${{ vars.DUMPRX_REF || '' }}
+      AOSPDTGEN_REPO: ${{ vars.AOSPDTGEN_REPO || 'https://github.com/sebaubuntu-python/aospdtgen.git' }}
+      AOSPDTGEN_REF: ${{ vars.AOSPDTGEN_REF || '' }}
+      SEPOLICY_DECOMPILER_REPO: ${{ vars.SEPOLICY_DECOMPILER_REPO || 'https://github.com/isus203/SELinux-CIL-Decompiler.git' }}
+      SEPOLICY_DECOMPILER_REF: ${{ vars.SEPOLICY_DECOMPILER_REF || '' }}
+      TWRPDTGEN_REPO: ${{ vars.TWRPDTGEN_REPO || 'https://github.com/twrpdtgen/twrpdtgen.git' }}
+      TWRPDTGEN_REF: ${{ vars.TWRPDTGEN_REF || '' }}
+      EXTRACT_TOOLS_REF: ${{ vars.EXTRACT_TOOLS_REF || 'lineage-22.1' }}
     steps:
-    - uses: actions/checkout@v4
-    - uses: rokibhasansagar/slimhub_actions@main
-    - uses: sersoft-gmbh/setup-gh-cli-action@v2
-      with:
-        version: stable
-          
-    - name: Clone and Setup DumprX
-      run: |
-        git clone https://github.com/DumprX/DumprX
-        cd DumprX
-        sudo chmod +x *.sh
-        bash setup.sh
-        pip3 install aospdtgen twrpdtgen
-      
-    - name: Install UV
-      run: curl -LsSf https://astral.sh/uv/install.sh | sh
-        
-    - name: Update Packages
-      run: |
-        sudo apt update
-        sudo apt -y upgrade
-        sudo apt -y install cpio aria2 git python3 neofetch tar gzip  p7zip-full python3-pip lz4 erofs-utils f2fs-tools libvixl-dev
-        pip install gdown
+      - name: WARNING - MediaTek (MTK) devices only
+        run: |
+          echo '::warning title=MTK firmware only::This workflow is intended for MediaTek (MTK) devices only. Do not use it for Qualcomm, Exynos, Unisoc or other SoCs.'
+          {
+            echo '## ⚠️ MediaTek (MTK) devices only'
+            echo 'This workflow is configured for MediaTek (MTK) firmware. Other chipsets are not supported or validated by this workflow.'
+            echo ''
+          } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Setup GithubCLI
-      run: |
-        type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
-        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-        && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-        && sudo apt update \
-        && sudo apt install gh -y
-        
-    - name: Authorize Git And GitHub CLI
-      run: |
-        git config --global user.name "${{ env.UN }}"
-        git config --global user.email "${{ env.UEM }}"
+      - name: Check out workflow repository
+        uses: actions/checkout@v4
 
-        # Оптимизация сети
-        git config --global http.postBuffer 524288000
-        git config --global http.version HTTP/1.1
-        # Уменьшаем сжатие, чтобы не вылететь по памяти
-        git config --global core.compression 1
-        
-        # Настройка лимитов памяти для упаковки объектов
-        git config --global pack.windowMemory "512m"
-        git config --global pack.packSizeLimit "512m"
-        git config --global pack.threads "1"
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-        # Принудительно устанавливаем URL с токеном
-        git remote set-url origin https://x-access-token:${{ secrets.GTOKEN }}@github.com/${{ github.repository }}.git
+      - name: Install host prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            aria2 build-essential bison cpio curl detox erofs-utils f2fs-tools \
+            flex git git-lfs gzip jq liblz4-tool lz4 m4 p7zip-full \
+            python3-venv rsync tar unzip wget xz-utils zstd
+          git lfs install --skip-repo
+          command -v gh >/dev/null || { echo 'GitHub CLI (gh) is missing'; exit 1; }
 
-        # Если файлов ОЧЕНЬ много, можно попробовать сделать "чистку" перед пушем
-        git gc --prune=now --aggressive
-        unset GITHUB_TOKEN
-        
-        gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
-      working-directory: ${{ github.workspace }}
-  
-    - name: Install firmware 
-      run: |
-        cd DumprX
-        gdown "${{ env.FUR }}" -O firmware.zip
-      working-directory: ${{ github.workspace }}
-        
-    - name: Create Dump
-      run: |
-        cd DumprX
-        bash dumper.sh ./firmware.zip
-        sudo chown -R $USER:$USER out
-        sudo chmod -R 755 out
-      working-directory: ${{ github.workspace }}
+      - name: Free unused SDK disk space
+        run: |
+          set -euo pipefail
+          # Firmware extraction needs disk space; this workflow does not build
+          # Android apps, .NET programs, or PowerShell projects.
+          for unused in /usr/share/dotnet /opt/ghc /usr/local/share/powershell /usr/local/lib/android/sdk; do
+            if [[ -d "$unused" ]]; then sudo rm -rf "$unused"; fi
+          done
+          docker system prune --all --force >/dev/null 2>&1 || true
+          df -h "$GITHUB_WORKSPACE"
 
-    - name: Extract Device Info
-      run: |
-        cd DumprX/out
-        
-        # Функция для очистки
-        clean_val() {
-            echo "$1" | head -1 | sed 's/[[:space:]]//g' | tr -d '\r'
-        }
+      - name: Clone and set up DumprX
+        run: |
+          set -euo pipefail
+          args=(--depth 1)
+          if [[ -n "$DUMPRX_REF" ]]; then args+=(--branch "$DUMPRX_REF"); fi
+          git clone "${args[@]}" "$DUMPRX_REPO" DumprX
+          cd DumprX
+          test -f dumper.sh && test -f setup.sh
+          printf 'DumprX commit: %s\n' "$(git rev-parse HEAD)"
+          bash setup.sh
 
-        # Функция для проверки, является ли значение бесполезным (заглушкой)
-        is_trash() {
-            local val=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-            [[ -z "$1" || "$val" == "alps" || "$val" == "unknown" || "$val" == "generic" || "$val" == "mainline" ]]
-        }
+      - name: Clone SELinux decompiler from repository
+        if: env.SEPOLICY_MODE != 'disabled'
+        run: |
+          set -euo pipefail
+          dest="$GITHUB_WORKSPACE/work/selinux-decompiler"
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          args=(--depth 1)
+          if [[ -n "$SEPOLICY_DECOMPILER_REF" ]]; then args+=(--branch "$SEPOLICY_DECOMPILER_REF"); fi
+          git clone "${args[@]}" "$SEPOLICY_DECOMPILER_REPO" "$dest"
+          if [[ ! -f "$dest/decompile.sh" ]]; then
+            echo '::error::The selected SELinux repository/ref has no decompile.sh.'
+            echo '::error::Publish the decompile.sh and its supporting sources from sepolicy.zip to that remote repo/branch, or set SEPOLICY_DECOMPILER_REPO and SEPOLICY_DECOMPILER_REF to a published updated repository. Set SEPOLICY_MODE=disabled to skip.'
+            exit 1
+          fi
+          test -f "$dest/decompile_cil.py" || { echo '::error::Missing decompile_cil.py'; exit 1; }
+          bash -n "$dest/decompile.sh"
+          printf 'SELinux decompiler commit: %s\n' "$(git -C "$dest" rev-parse HEAD)"
 
-        # Определяем приоритет файлов (сначала product и vendor, потом всё остальное)
-        PROPS_PRIORITY=$(ls product/build.prop vendor/build.prop odm/build.prop system/system/build.prop system/build.prop 2>/dev/null || find . -name "*.prop")
+      - name: Download and unpack firmware with DumprX
+        run: |
+          set -euo pipefail
+          cd DumprX
+          # DumprX accepts direct links, Google Drive, AndroidFileHost, etc.
+          # Do not force every downloaded firmware to be named firmware.zip.
+          bash dumper.sh "$FIRMWARE_URL"
+          test -d out || { echo 'DumprX/out was not created'; exit 1; }
+          if ! find out -type f -name 'build.prop' -print -quit | grep -q .; then
+            echo 'No build.prop was found: firmware extraction may have failed'
+            exit 1
+          fi
+          sudo chown -R "$(id -u):$(id -g)" out
 
-        # --- ИЗВЛЕЧЕНИЕ BRAND ---
-        for file in $PROPS_PRIORITY; do
-            val=$(grep -ahP "(?<=^ro.product.manufacturer=).*" "$file" | head -1)
-            [[ -z "$val" ]] && val=$(grep -ahP "(?<=^ro.product.brand=).*" "$file" | head -1)
-            val=$(clean_val "$val")
-            if ! is_trash "$val"; then
-                brand="$val"
-                break
+      - name: Read device metadata
+        run: |
+          set -euo pipefail
+          dump="$GITHUB_WORKSPACE/DumprX/out"
+          read_prop() {
+            local key="$1" file
+            for file in \
+              "$dump/system/system/build.prop" "$dump/system/build.prop" \
+              "$dump/vendor/build.prop" "$dump/vendor/etc/build.prop" \
+              "$dump/product/build.prop" "$dump/system_ext/build.prop"; do
+              if [[ -f "$file" ]]; then
+                local value
+                value="$(awk -v key="$key" 'index($0,key"=")==1 {sub(/^[^=]*=/,""); print; exit}' "$file")"
+                if [[ -n "$value" ]]; then printf '%s' "$value"; return 0; fi
+              fi
+            done
+            return 0
+          }
+          brand="$(read_prop ro.product.manufacturer)"
+          [[ -n "$brand" ]] || brand="$(read_prop ro.product.brand)"
+          [[ -n "$brand" ]] || brand="$VENDOR_FALLBACK"
+          codename="$(read_prop ro.product.device)"
+          [[ -n "$codename" ]] || codename="$(read_prop ro.build.product)"
+          [[ -n "$codename" ]] || codename="$CODE_FALLBACK"
+          version="$(read_prop ro.build.version.release)"
+          [[ -n "$version" ]] || version="unknown"
+          branch="$(read_prop ro.vendor.build.id)"
+          [[ -n "$branch" ]] || branch="$(read_prop ro.build.id)"
+          [[ -n "$branch" ]] || branch="main"
+
+          brand="$(printf '%s' "$brand" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/_/g; s/^_+|_+$//g' | cut -c1-48)"
+          codename="$(printf '%s' "$codename" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/_/g; s/^_+|_+$//g' | cut -c1-48)"
+          branch="$(printf '%s' "$branch" | sed -E 's/[^[:alnum:]_.-]+/_/g; s/\.\./_/g; s/^[^[:alnum:]]+//; s/[.]+$//; s/\.lock$//' | cut -c1-80)"
+          [[ -n "$branch" ]] || branch=main
+          [[ -n "$brand" && -n "$codename" ]] || {
+            echo 'Cannot determine manufacturer/codename: provide VENDOR_NAME and CODE_NAME'
+            exit 1
+          }
+          {
+            echo "BRAND=$brand"
+            echo "CODENAME=$codename"
+            echo "ANDROID_VERSION=$version"
+            echo "DUMP_BRANCH=$branch"
+          } >> "$GITHUB_ENV"
+          printf 'Manufacturer: %s\nCodename: %s\nAndroid: %s\nGitLab branch: %s\n' \
+            "$brand" "$codename" "$version" "$branch"
+
+      - name: Cache SEPolicy compilers and platform sources
+        if: env.SEPOLICY_MODE != 'disabled'
+        uses: actions/cache@v4
+        with:
+          path: |
+            work/selinux-decompiler/.cache
+            work/selinux-decompiler/out/host/linux-x86/bin
+            work/selinux-decompiler/system/sepolicy
+          key: sepolicy-${{ runner.os }}-${{ runner.arch }}-${{ inputs.SEPOLICY_BRANCH }}-v2
+
+      - name: Decompile SELinux policy
+        if: env.SEPOLICY_MODE != 'disabled'
+        run: |
+          set -euo pipefail
+          decompiler="$GITHUB_WORKSPACE/work/selinux-decompiler"
+          args=(
+            -d "$GITHUB_WORKSPACE/DumprX/out"
+            -o "$GITHUB_WORKSPACE/DumprX/out/selinux/decompiled"
+            -b "$SEPOLICY_BRANCH"
+          )
+          if [[ "$SEPOLICY_MODE" == 'current' ]]; then args+=(--current); fi
+          # decompile.sh reads the entire dump and resolves the proper policy
+          # versions for system, system_ext, product, and vendor. ODM is warned
+          # about, not falsely claimed as fully decompiled.
+          bash "$decompiler/decompile.sh" "${args[@]}"
+          test -n "$(find "$GITHUB_WORKSPACE/DumprX/out/selinux/decompiled" -type f -print -quit)"
+          printf '\n## SELinux decompilation\n\n' >> "$GITHUB_WORKSPACE/DumprX/out/README.md"
+          printf 'Generated using DumprX SEPolicy `decompile.sh`, branch `%s`.\n' \
+            "$SEPOLICY_BRANCH" >> "$GITHUB_WORKSPACE/DumprX/out/README.md"
+          printf 'Readable policies: `selinux/decompiled/` (system, system_ext, product, vendor when present).\n' \
+            >> "$GITHUB_WORKSPACE/DumprX/out/README.md"
+
+      - name: Upload decompiled SEPolicy as a standalone artifact
+        if: env.SEPOLICY_MODE != 'disabled'
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-sepolicy-${{ github.run_id }}
+          path: DumprX/out/selinux/decompiled/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Clean broken symlinks and add dump metadata
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/DumprX/out"
+          # Only dangling symlinks are removed. Existing firmware files remain.
+          find . -type l ! -exec test -e {} \; -print -delete
+          if [[ ! -f README.md ]]; then printf '# Firmware dump\n' > README.md; fi
+          {
+            printf '\n> **WARNING:** This dump workflow targets **MediaTek (MTK)** devices only. Other chipsets are not supported or validated.\n'
+            printf '\n## Dump metadata\n'
+            printf -- '- Manufacturer: `%s`\n' "$BRAND"
+            printf -- '- Device: `%s`\n' "$CODENAME"
+            printf -- '- Android release: `%s`\n' "$ANDROID_VERSION"
+            printf -- '- DumprX source: `%s`\n' "$DUMPRX_REPO"
+          printf -- '- SELinux source: `%s`\n' "$SEPOLICY_DECOMPILER_REPO"
+            if [[ "$SEPOLICY_MODE" != 'disabled' ]]; then
+              printf -- '- SELinux: processed with `decompile.sh`\n'
+            else
+              printf -- '- SELinux: decompilation disabled for this run\n'
             fi
-        done
+          } >> README.md
 
-        # --- ИЗВЛЕЧЕНИЕ CODENAME (Model) ---
-        for file in $PROPS_PRIORITY; do
-            val=$(grep -ahP "(?<=^ro.product.model=).*" "$file" | head -1)
-            [[ -z "$val" ]] && val=$(grep -ahP "(?<=^ro.product.device=).*" "$file" | head -1)
-            val=$(clean_val "$val")
-            if ! is_trash "$val"; then
-                codename="$val"
-                break
+      - name: Generate LineageOS tree (when requested)
+        if: env.GENERATE_VENDOR == 'true' || env.UPLOAD_LINEAGE_DT == 'true'
+        run: |
+          set -euo pipefail
+          # Clone the Python package source, never install an unrelated PyPI build.
+          src="$GITHUB_WORKSPACE/work/aospdtgen"
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          args=(--depth 1)
+          if [[ -n "$AOSPDTGEN_REF" ]]; then args+=(--branch "$AOSPDTGEN_REF"); fi
+          git clone "${args[@]}" "$AOSPDTGEN_REPO" "$src"
+          test -f "$src/pyproject.toml" || { echo 'Missing aospdtgen pyproject.toml'; exit 1; }
+          python -m pip install "$src"
+          python -m aospdtgen --help >/dev/null
+          printf 'aospdtgen commit: %s\n' "$(git -C "$src" rev-parse HEAD)"
+          mkdir -p "$GITHUB_WORKSPACE/generated/lineage" \
+                   "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME"
+          python -m aospdtgen -o "$GITHUB_WORKSPACE/generated/lineage" "$GITHUB_WORKSPACE/DumprX/out"
+          # New aospdtgen generates extract-files.py; older releases use .sh.
+          # Some device trees have no proprietary-files list; BoardConfig.mk
+          # is a more reliable marker of a successfully generated tree.
+          test -f "$GITHUB_WORKSPACE/generated/lineage/BoardConfig.mk" || {
+            echo 'aospdtgen produced no BoardConfig.mk'; exit 1;
+          }
+          cp -a "$GITHUB_WORKSPACE/generated/lineage/." \
+            "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME/"
+
+      - name: Extract vendor tree (when requested)
+        if: env.GENERATE_VENDOR == 'true'
+        run: |
+          set -euo pipefail
+          android="$GITHUB_WORKSPACE/generated/android"
+          mkdir -p "$android/tools" "$android/prebuilts"
+          git clone --depth 1 --branch "$EXTRACT_TOOLS_REF" \
+            https://github.com/LineageOS/android_tools_extract-utils.git \
+            "$android/tools/extract-utils"
+          git clone --depth 1 --branch "$EXTRACT_TOOLS_REF" \
+            https://github.com/LineageOS/android_prebuilts_extract-tools.git \
+            "$android/prebuilts/extract-tools"
+          cd "$android/device/$BRAND/$CODENAME"
+          if [[ -f extract-files.py ]]; then
+            PYTHONPATH="$android/tools/extract-utils${PYTHONPATH:+:$PYTHONPATH}" \
+              python extract-files.py "$GITHUB_WORKSPACE/DumprX/out"
+          elif [[ -f extract-files.sh ]]; then
+            bash extract-files.sh "$GITHUB_WORKSPACE/DumprX/out"
+          else
+            echo '::error::The selected aospdtgen version produced no extract-files.py/sh'
+            exit 1
+          fi
+          [[ -d "$android/vendor/$BRAND/$CODENAME" ]] || {
+            echo 'Vendor extraction produced no vendor tree'; exit 1;
+          }
+
+      - name: Generate TWRP tree (when requested)
+        if: env.UPLOAD_TWRP_DT == 'true'
+        run: |
+          set -euo pipefail
+          src="$GITHUB_WORKSPACE/work/twrpdtgen"
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          args=(--depth 1)
+          if [[ -n "$TWRPDTGEN_REF" ]]; then args+=(--branch "$TWRPDTGEN_REF"); fi
+          git clone "${args[@]}" "$TWRPDTGEN_REPO" "$src"
+          test -f "$src/pyproject.toml" || { echo 'Missing twrpdtgen pyproject.toml'; exit 1; }
+          python -m pip install "$src"
+          python -m twrpdtgen --help >/dev/null
+          printf 'twrpdtgen commit: %s\n' "$(git -C "$src" rev-parse HEAD)"
+          dump="$GITHUB_WORKSPACE/DumprX"
+          image="$(find "$dump/out" "$dump/input" -type f -name recovery.img -print -quit 2>/dev/null || true)"
+          if [[ -z "$image" ]]; then
+            image="$(find "$dump/out" "$dump/input" -type f -name boot.img -print -quit 2>/dev/null || true)"
+          fi
+          [[ -n "$image" ]] || { echo 'TWRP generator requires recovery.img or boot.img'; exit 1; }
+          mkdir -p "$GITHUB_WORKSPACE/generated/twrp"
+          ( cd "$GITHUB_WORKSPACE/generated/twrp" && python -m twrpdtgen "$image" )
+          [[ -d "$GITHUB_WORKSPACE/generated/twrp/output" ]] || {
+            echo 'TWRP generator did not produce an output directory'; exit 1;
+          }
+
+      - name: Publish optional trees to GitHub
+        if: env.GENERATE_VENDOR == 'true' || env.UPLOAD_LINEAGE_DT == 'true' || env.UPLOAD_TWRP_DT == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GTOKEN }}
+          TARGET_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          [[ -n "$GH_TOKEN" ]] || { echo 'GTOKEN secret is required to create tree repositories'; exit 1; }
+          gh auth setup-git
+          git_user="${USER_NAME:-github-actions[bot]}"
+          publish_tree() {
+            local source="$1" repo="$2" branch="$3"
+            [[ -d "$source" ]] || { echo "Missing generated tree: $source"; return 1; }
+            if ! gh repo view "$TARGET_OWNER/$repo" >/dev/null 2>&1; then
+              gh repo create "$TARGET_OWNER/$repo" --public --description="Generated firmware tree for $CODENAME"
             fi
-        done
-
-        # --- ИЗВЛЕЧЕНИЕ VERSION & FINGERPRINT ---
-        # Для них обычно достаточно первого совпадения из приоритетных файлов
-        version=$(grep -ahP "(?<=^ro.build.version.release=).*" $PROPS_PRIORITY | grep -v "unknown" | head -1 | tr -d '\r')
-        fingerprint=$(grep -ahP "(?<=^ro.build.fingerprint=).*" $PROPS_PRIORITY | head -1 | tr -d '\r')
-
-        # Фоллбэк (если всё еще пусто)
-        [[ -z "$brand" ]] && brand="unknown"
-        [[ -z "$codename" ]] && codename="device_$(date +%H%M)"
-        
-        # Финальная очистка для папок (только мелкие буквы)
-        folder_brand=$(echo "$brand" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
-        folder_codename=$(echo "$codename" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
-
-        echo "========================================"
-        echo "BRAND       : $brand"
-        echo "CODENAME    : $codename"
-        echo "VERSION     : $version"
-        echo "========================================"
-
-        echo "$folder_codename" > ${{ github.workspace }}/codename.txt
-        echo "$folder_brand" > ${{ github.workspace }}/brand.txt
-        echo "$version" > ${{ github.workspace }}/version.txt
-        echo "$fingerprint" > ${{ github.workspace }}/fingerprint.txt
-
-    - name: Uploading ROM Dump
-      env:
-        GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      run: |
-        codename=$(cat ${{ github.workspace }}/codename.txt)
-        brand=$(cat ${{ github.workspace }}/brand.txt)
-        version=$(cat ${{ github.workspace }}/version.txt)
-        repo_name="dump_${brand}_${codename}"
-        dat=$(date +%Y%m%d)
-        
-        cd DumprX/out
-        
-        sudo rm -rf .git
-        git config --global init.defaultBranch main
-        git init
-        git branch -M dump-"$codename"-"$dat"
-        git add .
-        git commit -s -m "Dump for $brand $codename (Android $version)"
-        
-        # Проверка и создание репозитория
-        if gh repo view "${{ github.repository_owner }}/$repo_name" >/dev/null 2>&1; then
-          git remote add origin "https://github.com/${{ github.repository_owner }}/$repo_name.git"
-          git push -u origin dump-"$codename"-"$dat" --force
-        else
-          gh repo create "$repo_name" --public --description="Dump for $brand $codename" --source=. --remote=origin --push
-        fi
-
-        # Подготовка структуры для следующих шагов
-        mkdir -p ${{ github.workspace }}/vnd_project/dump
-        mkdir -p ${{ github.workspace }}/vnd_project/android/device/"$brand"/"$codename"
-        [ -d "lineage-device-tree" ] && mv lineage-device-tree/* ${{ github.workspace }}/vnd_project/android/device/"$brand"/"$codename"/
-        mv * ${{ github.workspace }}/vnd_project/dump/ 2>/dev/null || true
-
-    - name: Create vendor tree
-      if: env.GVT == 'true'
-      run: |
-        codename=$(cat ${{ github.workspace }}/codename.txt)
-        brand=$(cat ${{ github.workspace }}/brand.txt)
-        
-        cd ${{ github.workspace }}/vnd_project
-        if [ -d android/device/"$brand"/"$codename" ]; then
-           git clone --depth=1 https://github.com/LineageOS/android_tools_extract-utils -b lineage-22.1 ./android/tools/extract-utils
-           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_extract-tools -b lineage-22.1 ./android/prebuilts/extract-tools
-           
-           sudo chmod 777 android/device/"$brand"/"$codename"/*.sh
-           cd android/device/"$brand"/"$codename"
-           bash extract-files.sh ${{ github.workspace }}/vnd_project/dump/
-        else
-           echo "LINEAGEOS DEVICE TREE NOT FOUND!"
-           exit 1
-        fi
-
-    - name: Uploading Vendor Tree
-      if: env.GVT == 'true'
-      env:
-        GH_TOKEN: ${{ secrets.GTOKEN }}
-      run: |
-        codename=$(cat ${{ github.workspace }}/codename.txt)
-        brand=$(cat ${{ github.workspace }}/brand.txt)
-        
-        cd ${{ github.workspace }}/vnd_project/android/vendor/"$brand"/"$codename"
-        git init
-        git branch -M vendor-"$codename"-$(date +%Y%m%d)
-        git add .
-        git commit -s -m "$codename: initial vendor tree"
-        gh repo create android_vendor_"$brand"_"$codename" --public --description="Vendor tree for $codename" --source=. --remote=origin --push
-        echo "🌳 **Vendor Tree:** [android_vendor_${brand}_${codename}](https://github.com/${{ github.repository_owner }}/android_vendor_${brand}_${codename})" >> $GITHUB_STEP_SUMMARY
-
-    - name: Uploading LineageOS Device Tree
-      if: env.LOT == 'true'
-      env:
-        GH_TOKEN: ${{ secrets.GTOKEN }}
-      run: |
-        codename=$(cat ${{ github.workspace }}/codename.txt)
-        brand=$(cat ${{ github.workspace }}/brand.txt)
-        cd ${{ github.workspace }}/vnd_project/android/device/"$brand"/"$codename"
-        git init
-        git branch -M lineage-"$codename"-$(date +%Y%m%d)
-        git add .
-        git commit -s -m "$codename: LineageOS device tree"
-        gh repo create lineage_device_"$brand"_"$codename" --public --description="LineageOS tree for $codename" --source=. --remote=origin --push
-      continue-on-error: true
-
-    - name: Uploading preview of images
-      uses: actions/upload-artifact@v4
-      with: 
-        name: Prewiew images
-        path: |
-          /home/Auto-Firmware-Dumper/boot.img
-          /home/Auto-Firmware-Dumper/recovery.img
-          /home/Auto-Firmware-Dumper/vendor_boot.img
-          /home/Auto-Firmware-Dumper/init_boot.img
-          /home/Auto-Firmware-Dumper/dtbo.img
-          /home/Auto-Firmware-Dumper/dtb.img
-        if-no-files-found: ignore
-      continue-on-error: true
+            (
+              cd "$source"
+              rm -rf .git
+              git init -b "$branch"
+              git config user.name "$git_user"
+              git config user.email "$GIT_AUTHOR_EMAIL"
+              git add -A
+              git diff --cached --quiet && { echo "No files in $repo"; exit 1; }
+              git commit -m "Auto-generated tree for $CODENAME"
+              git remote add origin "https://github.com/$TARGET_OWNER/$repo.git"
+              git push -u origin "$branch"
+            )
+            echo "- [$repo](https://github.com/$TARGET_OWNER/$repo/tree/$branch)" >> "$GITHUB_STEP_SUMMARY"
+          }
+          if [[ "$GENERATE_VENDOR" == 'true' ]]; then
+            publish_tree "$GITHUB_WORKSPACE/generated/android/vendor/$BRAND/$CODENAME" \
+              "android_vendor_${BRAND}_${CODENAME}" "vendor-${CODENAME}-${GITHUB_RUN_ID}"
+          fi
+          if [[ "$UPLOAD_LINEAGE_DT" == 'true' ]]; then
+            publish_tree "$GITHUB_WORKSPACE/generated/android/device/$BRAND/$CODENAME" \
+              "lineage_device_${BRAND}_${CODENAME}" "lineage-${CODENAME}-${GITHUB_RUN_ID}"
+          fi
+          if [[ "$UPLOAD_TWRP_DT" == 'true' ]]; then
+            mapfile -d '' trees < <(find "$GITHUB_WORKSPACE/generated/twrp/output" \
+              -type f -name BoardConfig.mk -print0)
+            [[ "${#trees[@]}" -eq 1 ]] || {
+              echo 'Cannot uniquely locate generated TWRP tree'; exit 1;
+            }
+            publish_tree "$(dirname "${trees[0]}")" \
+              "twrp_device_${BRAND}_${CODENAME}" "twrp-${CODENAME}-${GITHUB_RUN_ID}"
+          fi
+      - name: Create GitHub release repository and archive
+        env:
+          GH_TOKEN: ${{ secrets.GTOKEN }}
+          TARGET_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          [[ -n "$GH_TOKEN" ]] || { echo 'Missing GTOKEN: repo creation requires a GitHub PAT'; exit 1; }
+          repo="dump_${BRAND}_${CODENAME}"
+          target="$TARGET_OWNER/$repo"
+          tag="dump-${CODENAME}-${GITHUB_RUN_ID}"
+          if ! gh repo view "$target" >/dev/null 2>&1; then
+            gh repo create "$target" --public --add-readme \
+              --description="MediaTek (MTK) stock firmware dump for $BRAND $CODENAME"
+          fi
+          # Firmware input was already extracted. Optional tree generators ran
+          # before this step and no longer need DumprX/input.
+          rm -rf "$GITHUB_WORKSPACE/DumprX/input" "$GITHUB_WORKSPACE/DumprX/out/tmp"
+          mkdir -p "$GITHUB_WORKSPACE/releases"
+          archive="$GITHUB_WORKSPACE/releases/full_dump_${CODENAME}_${GITHUB_RUN_ID}.7z"
+          ( cd "$GITHUB_WORKSPACE/DumprX/out" && \
+            7z a -t7z -mx=1 -v1900m "$archive" . -xr!.git -xr!tmp )
+          shopt -s nullglob
+          chunks=( "$archive".* )
+          [[ "${#chunks[@]}" -gt 0 ]] || { echo '7z did not produce release volumes'; exit 1; }
+          sha256sum "${chunks[@]}" > "$GITHUB_WORKSPACE/releases/SHA256SUMS.txt"
+          gh release create "$tag" "${chunks[@]}" "$GITHUB_WORKSPACE/releases/SHA256SUMS.txt" \
+            --repo "$target" --title="Full dump $BRAND $CODENAME ($ANDROID_VERSION)" \
+            --notes="WARNING: MediaTek (MTK) firmware only; other chipsets are not supported/validated. DumprX dump with optional SELinux decompilation. Check SHA256SUMS.txt after downloading all 7z volumes." \
+            --target="$(gh api "repos/$target" --jq .default_branch)"
+          echo "### GitHub dump" >> "$GITHUB_STEP_SUMMARY"
+          echo "- https://github.com/$target/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload small firmware images (if available)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-images-${{ github.run_id }}
+          path: |
+            DumprX/out/boot/*.img
+            DumprX/out/recovery/*.img
+            DumprX/out/vendor_boot/*.img
+            DumprX/out/init_boot/*.img
+            DumprX/out/dtbo/*.img
+          if-no-files-found: ignore
+          retention-days: 7
