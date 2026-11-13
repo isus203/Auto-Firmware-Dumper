@@ -36,6 +36,10 @@ on:
         description: 'Generate and publish experimental TWRP tree to GitLab'
         type: boolean
         default: false
+      UPLOAD_FULL_DUMP:
+        description: 'Publish full extracted dump to GitLab (turn OFF for >10 GiB Free project)'
+        type: boolean
+        default: true
       SEPOLICY_MODE:
         description: 'SELinux mode: versioned API, current macros, or disabled'
         type: choice
@@ -68,9 +72,10 @@ jobs:
     env:
       FIRMWARE_URL: ${{ inputs.FIRMWARE_URL }}
       USER_NAME: ${{ inputs.USER_NAME }}
-      # Use the GitHub Actions bot no-reply address for every new commit.
-      GIT_AUTHOR_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
-      GIT_COMMITTER_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
+      # Never use the account's personal email. For GitLab attribution,
+      # set GITLAB_COMMIT_EMAIL to the private commit email from GitLab profile.
+      GIT_AUTHOR_EMAIL: ${{ vars.GITLAB_COMMIT_EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}
+      GIT_COMMITTER_EMAIL: ${{ vars.GITLAB_COMMIT_EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}
       PUBLISH_PROVIDER: gitlab
       PUSH_PAUSE_SECONDS: ${{ vars.DUMP_PUSH_PAUSE_SECONDS || '10' }}
       VENDOR_FALLBACK: ${{ inputs.VENDOR_NAME }}
@@ -80,6 +85,7 @@ jobs:
       GENERATE_VENDOR: ${{ inputs.GENERATE_VENDOR }}
       UPLOAD_LINEAGE_DT: ${{ inputs.UPLOAD_LINEAGE_DT }}
       UPLOAD_TWRP_DT: ${{ inputs.UPLOAD_TWRP_DT }}
+      UPLOAD_FULL_DUMP: ${{ inputs.UPLOAD_FULL_DUMP }}
       # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
       DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
       DUMPRX_REF: ${{ vars.DUMPRX_REF || '' }}
@@ -504,6 +510,11 @@ jobs:
               return f'{n / (1024**3):.2f} GiB'
           print(f'Files: {n_files}; total: {gib(size_total)}')
           print(f'Files >= 50 MiB: {n_lfs}; estimated LFS: {gib(size_lfs)}')
+          if os.environ.get('PUBLISH_PROVIDER') == 'gitlab' and size_total > 9.5 * 1024**3:
+              print('::warning::Extracted dump is larger than the 10 GiB GitLab Free project quota. '
+                    'Even correctly tracked Git LFS files consume project storage. '
+                    'Set UPLOAD_FULL_DUMP=false to publish only the requested '
+                    'Vendor/Lineage/TWRP trees, or use another archive host.')
           summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
           with summary.open('a') as file:
               file.write('### Dump size before upload\n')
@@ -573,6 +584,7 @@ jobs:
         if: env.GENERATE_VENDOR == 'true' || env.UPLOAD_LINEAGE_DT == 'true' || env.UPLOAD_TWRP_DT == 'true'
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_TREE_BUDGET_GIB: ${{ vars.GITLAB_TREE_BUDGET_GIB || '9.5' }}
         run: |
           set -euo pipefail
           [[ -n "${GITLAB_TOKEN:-}" ]] || { echo '::error::Missing GITLAB_TOKEN'; exit 1; }
@@ -580,15 +592,135 @@ jobs:
           tree_brand="${TREE_BRAND:-$BRAND}"
           tree_codename="${TREE_CODENAME:-$CODENAME}"
           api='https://gitlab.com/api/v4'
+
           publish_tree() {
             local source="$1" repo="$2" branch="$3"
             [[ -d "$source" ]] || { echo "::error::Missing generated tree: $source"; return 1; }
+
+            # Prepare and validate the complete local Git/LFS commit BEFORE
+            # creating a remote project. An unsuccessful upload must not create
+            # another empty GitLab project that displays setup instructions.
+            (
+              cd "$source"
+              rm -rf .git
+              git init -b "$branch"
+              git config user.name "${USER_NAME:-github-actions[bot]}"
+              git config user.email "$GIT_AUTHOR_EMAIL"
+              git config core.quotepath false
+              git config pack.threads 2
+              git lfs install --local
+
+              # GitLab Free rejects normal Git blobs >= 100 MiB.
+              # Set up Git LFS before 'git add', including extensions that
+              # wouldn't normally be considered binaries (png, wav, etc.).
+              local large_count=0
+              while IFS= read -r -d '' path; do
+                git lfs track -- "$path"
+                large_count=$((large_count + 1))
+              done < <(find . -type f -size +49M \
+                -not -path './.git/*' -printf '%P\0')
+
+              git add -A
+              if git diff --cached --quiet; then
+                echo "::error::No generated files to publish in $source"
+                exit 1
+              fi
+
+              # Verify the staged version of each large working-tree file,
+              # not just that a .gitattributes file happened to be created.
+              # GitLab's pre-receive hook checks Git objects, not file sizes
+              # on disk. Fail before publishing if any object escaped LFS.
+              python3 - <<'PY_LFS_CHECK'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          entries = subprocess.check_output(
+              ['git', 'ls-files', '--stage', '-z']).split(b'\0')
+          large_paths = []
+          total_bytes = 0
+          problems = []
+          for entry in entries:
+              if not entry:
+                  continue
+              info, raw_path = entry.split(b'\t', 1)
+              mode, sha, stage = info.decode('ascii').split()
+              if mode not in ('100644', '100755'):
+                  continue
+              name = os.fsdecode(raw_path)
+              path = Path(name)
+              if not path.is_file() or path.is_symlink():
+                  continue
+              size = path.stat().st_size
+              total_bytes += size
+              if size >= 50 * 1024**2:
+                  large_paths.append((name, sha, size))
+
+          # A budget preflight prevents an obvious quota failure, even when
+          # LFS pointers fix the 100 MiB individual blob restriction.
+          budget_gib = float(os.environ['GITLAB_TREE_BUDGET_GIB'])
+          if budget_gib <= 0:
+              raise SystemExit('GITLAB_TREE_BUDGET_GIB must be greater than zero')
+          print(f'Tree total files: {total_bytes / 1024**3:.2f} GiB, '
+                f'large LFS candidates: {len(large_paths)}, '
+                f'configured budget: {budget_gib:g} GiB')
+          if total_bytes > budget_gib * 1024**3:
+              raise SystemExit(
+                  f'::error::Tree is {total_bytes / 1024**3:.2f} GiB; '
+                  f'this exceeds the configured GitLab Git+LFS budget of '
+                  f'{budget_gib:g} GiB. Free projects have a 10 GiB '
+                  'repository+LFS storage cap. Split the tree or use paid storage.'
+              )
+
+          for name, sha, size in large_paths:
+              attr = subprocess.check_output(
+                  ['git', 'check-attr', '--cached', 'filter', '--', name],
+                  text=True).strip()
+              staged_size = int(subprocess.check_output(
+                  ['git', 'cat-file', '-s', sha], text=True).strip())
+              blob = subprocess.check_output(['git', 'cat-file', 'blob', sha])
+              if (not attr.endswith(': lfs') or
+                  staged_size >= 100 * 1024**2 or
+                  not blob.startswith(b'version https://git-lfs.github.com/spec/v1\n')):
+                  problems.append(f'{name}: working file={size} bytes, '
+                                  f'staged blob={staged_size} bytes, attr={attr}')
+
+          # Also catch any other normal Git object above the Free limit.
+          oids = []
+          for entry in entries:
+              if not entry:
+                  continue
+              info, _ = entry.split(b'\t', 1)
+              mode, sha, stage = info.decode('ascii').split()
+              if mode in ('100644', '100755'):
+                  oids.append(sha)
+          if oids:
+              sizes = subprocess.check_output(
+                  ['git', 'cat-file', '--batch-check=%(objectsize)'],
+                  input=('\n'.join(oids) + '\n').encode('ascii')).splitlines()
+              oversized = [s for s in sizes if int(s) >= 100 * 1024**2]
+              if oversized:
+                  problems.append(f'{len(oversized)} staged Git blob(s) >= 100 MiB')
+
+          if problems:
+              for problem in problems[:25]:
+                  print('::error::Git LFS preflight: ' + problem)
+              raise SystemExit('Unsafe Git blobs found. No project was pushed.')
+          print('Git LFS preflight passed: all large files are LFS pointers.')
+          PY_LFS_CHECK
+
+              git commit -m "Auto-generated MTK tree for $tree_codename"
+              echo "Prepared $repo: $large_count large file(s) tracked by Git LFS."
+            )
+
+            # Only now resolve/create the GitLab repository.
             local encoded status
-            encoded="$(printf '%s' "${GITLAB_USERNAME}/${repo}" | python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(),safe=""))')"
+            encoded="$(printf '%s' "${GITLAB_USERNAME}/${repo}" |
+              python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(),safe=""))')"
             status="$(curl -sS -o /dev/null -w '%{http_code}' \
               --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$api/projects/$encoded")"
             case "$status" in
-              200) echo "GitLab tree repository already exists: $repo" ;;
+              200) echo "GitLab tree repository exists: $repo" ;;
               404)
                 curl --fail-with-body -sS --request POST \
                   --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
@@ -597,25 +729,20 @@ jobs:
                   --data-urlencode 'visibility=public' \
                   --data-urlencode "description=MediaTek (MTK) device tree for $tree_codename" \
                   "$api/projects" >/dev/null ;;
-              *) echo "::error::GitLab tree repository lookup returned HTTP $status for $repo"; return 1 ;;
+              *) echo "::error::GitLab project lookup returned HTTP $status for $repo"; return 1 ;;
             esac
+
             (
               cd "$source"
-              rm -rf .git
-              git init -b "$branch"
-              git config user.name "${USER_NAME:-github-actions[bot]}"
-              git config user.email "$GIT_AUTHOR_EMAIL"
-              git add -A
-              if git diff --cached --quiet; then
-                echo "::error::No generated files to publish in $source"
-                exit 1
-              fi
-              git commit -m "Auto-generated MTK tree for $tree_codename"
               git remote add origin "git@gitlab.com:${GITLAB_USERNAME}/${repo}.git"
+              # LFS uploads occur over the GitLab LFS transport using the
+              # configured SSH identity. Upload objects before the Git ref.
+              git lfs push origin "$branch"
               git push -u origin "HEAD:refs/heads/$branch"
             )
             echo "- [$repo](https://gitlab.com/$GITLAB_USERNAME/$repo/-/tree/$branch)" >> "$GITHUB_STEP_SUMMARY"
           }
+
           if [[ "$GENERATE_VENDOR" == 'true' ]]; then
             publish_tree "$GITHUB_WORKSPACE/generated/android/vendor/$tree_brand/$tree_codename" \
               "android_vendor_${tree_brand}_${tree_codename}" "vendor-${tree_codename}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -635,6 +762,7 @@ jobs:
           fi
 
       - name: Upload firmware dump with Git and LFS
+        if: env.UPLOAD_FULL_DUMP == 'true'
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/DumprX/out"
