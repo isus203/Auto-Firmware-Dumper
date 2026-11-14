@@ -32,10 +32,6 @@ on:
         description: 'Generate and publish LineageOS device tree to GitLab'
         type: boolean
         default: false
-      UPLOAD_TWRP_DT:
-        description: 'Generate and publish experimental TWRP tree to GitLab'
-        type: boolean
-        default: false
       UPLOAD_FULL_DUMP:
         description: 'Publish full extracted dump to GitLab (turn OFF for >10 GiB Free project)'
         type: boolean
@@ -84,7 +80,6 @@ jobs:
       SEPOLICY_BRANCH: ${{ inputs.SEPOLICY_BRANCH }}
       GENERATE_VENDOR: ${{ inputs.GENERATE_VENDOR }}
       UPLOAD_LINEAGE_DT: ${{ inputs.UPLOAD_LINEAGE_DT }}
-      UPLOAD_TWRP_DT: ${{ inputs.UPLOAD_TWRP_DT }}
       UPLOAD_FULL_DUMP: ${{ inputs.UPLOAD_FULL_DUMP }}
       # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
       DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
@@ -93,8 +88,6 @@ jobs:
       AOSPDTGEN_REF: ${{ vars.AOSPDTGEN_REF || '' }}
       SEPOLICY_DECOMPILER_REPO: ${{ vars.SEPOLICY_DECOMPILER_REPO || 'https://github.com/isus203/SELinux-CIL-Decompiler.git' }}
       SEPOLICY_DECOMPILER_REF: ${{ vars.SEPOLICY_DECOMPILER_REF || '' }}
-      TWRPDTGEN_REPO: ${{ vars.TWRPDTGEN_REPO || 'https://github.com/twrpdtgen/twrpdtgen.git' }}
-      TWRPDTGEN_REF: ${{ vars.TWRPDTGEN_REF || '' }}
       EXTRACT_TOOLS_REF: ${{ vars.EXTRACT_TOOLS_REF || 'lineage-22.1' }}
     steps:
       - name: WARNING - MediaTek (MTK) devices only
@@ -451,30 +444,70 @@ jobs:
             echo "::error::Vendor extraction produced no vendor tree at vendor/$tree_brand/$tree_codename"; exit 1;
           }
 
-      - name: Generate TWRP tree (when requested)
-        if: env.UPLOAD_TWRP_DT == 'true'
+      - name: Finalize firmware-only dump before publishing
         run: |
           set -euo pipefail
-          src="$GITHUB_WORKSPACE/work/twrpdtgen"
-          mkdir -p "$GITHUB_WORKSPACE/work"
-          args=(--depth 1)
-          if [[ -n "$TWRPDTGEN_REF" ]]; then args+=(--branch "$TWRPDTGEN_REF"); fi
-          git clone "${args[@]}" "$TWRPDTGEN_REPO" "$src"
-          test -f "$src/pyproject.toml" || { echo 'Missing twrpdtgen pyproject.toml'; exit 1; }
-          python -m pip install "$src"
-          python -m twrpdtgen --help >/dev/null
-          printf 'twrpdtgen commit: %s\n' "$(git -C "$src" rev-parse HEAD)"
-          dump="$GITHUB_WORKSPACE/DumprX"
-          image="$(find "$dump/out" "$dump/input" -type f -name recovery.img -print -quit 2>/dev/null || true)"
-          if [[ -z "$image" ]]; then
-            image="$(find "$dump/out" "$dump/input" -type f -name boot.img -print -quit 2>/dev/null || true)"
+          dump="$GITHUB_WORKSPACE/DumprX/out"
+          [[ -d "$dump" ]] || { echo '::error::Missing extracted dump'; exit 1; }
+
+          # DumprX or generators may put a device tree directly into out/.
+          # Trees have their own GitLab repositories: they must not become
+          # top-level directories of android_dump_<manufacturer>_<device>.
+          # Only delete recognized generator OUTPUTS at the dump root; never
+          # delete firmware partitions such as system, vendor, odm or dtbo.
+          removed_trees=0
+          for name in \
+            aosp-device-tree aosp_device_tree \
+            lineage-device-tree lineageos-device-tree \
+            twrp-device-tree vendor-tree \
+            device-tree device_tree; do
+            candidate="$dump/$name"
+            if [[ -e "$candidate" || -L "$candidate" ]]; then
+              echo "Removing generated tree from dump: $name"
+              rm -rf -- "$candidate"
+              removed_trees=$((removed_trees + 1))
+            fi
+          done
+
+          # Follow the original gitlab.yml.txt policy: keep decompiled policy,
+          # but do not duplicate raw SELinux folders under selinux/.
+          # Original partition directories outside selinux/ are preserved.
+          for part in system vendor product system_ext odm; do
+            candidate="$dump/selinux/$part"
+            if [[ -d "$candidate" && ! -L "$candidate" ]]; then
+              echo "Removing duplicate SELinux input: selinux/$part"
+              rm -rf -- "$candidate"
+            fi
+          done
+
+          # Exactly as in gitlab.yml.txt: remove dangling symlinks only.
+          # Working firmware symlinks are not removed.
+          echo 'Removing broken symbolic links from dump:'
+          find "$dump" -type l ! -exec test -e {} \; -print -delete
+
+          # Explicit safety check so an accidental future generator change
+          # cannot silently publish the unwanted top-level device tree.
+          if [[ -e "$dump/aosp-device-tree" || -L "$dump/aosp-device-tree" ]]; then
+            echo '::error::aosp-device-tree must not be present in published dump'
+            exit 1
           fi
-          [[ -n "$image" ]] || { echo 'TWRP generator requires recovery.img or boot.img'; exit 1; }
-          mkdir -p "$GITHUB_WORKSPACE/generated/twrp"
-          ( cd "$GITHUB_WORKSPACE/generated/twrp" && python -m twrpdtgen "$image" )
-          [[ -d "$GITHUB_WORKSPACE/generated/twrp/output" ]] || {
-            echo 'TWRP generator did not produce an output directory'; exit 1;
-          }
+
+          if [[ ! -f "$dump/README.md" ]]; then
+            printf '# Firmware dump\n' > "$dump/README.md"
+          fi
+          {
+            printf '\n## Publishing cleanup\n'
+            printf '%s\n' '- Broken symbolic links removed; valid firmware symlinks preserved.'
+            printf '%s\n' '- Generated device trees are excluded from the firmware dump (published separately when selected).'
+            printf '%s\n' '- Duplicate SELinux input folders under `selinux/` are excluded; decompiled policy is retained.'
+            printf '%s\n' '- SenseTime entries and `.lic` files are excluded from Git publication.'
+          } >> "$dump/README.md"
+          {
+            echo '### Firmware-only dump cleanup'
+            echo "- Removed generated tree entries: $removed_trees"
+            echo '- Device trees are published only to their respective GitLab repositories.'
+            echo '- Removed broken links and duplicate SELinux inputs from firmware-only content.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Preflight Git and LFS sizes
         run: |
@@ -766,6 +799,14 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/DumprX/out"
+          # Guard the publication boundary: never publish the generated tree,
+          # including when DumprX changes its output layout later in the job.
+          for name in aosp-device-tree aosp_device_tree lineage-device-tree \
+                      lineageos-device-tree twrp-device-tree vendor-tree \
+                      device-tree device_tree; do
+            rm -rf -- "$name"
+          done
+          find . -type l ! -exec test -e {} \; -print -delete
           rm -rf .git
           git init -b "$DUMP_BRANCH"
           git config user.name "${USER_NAME:-github-actions[bot]}"
@@ -774,12 +815,25 @@ jobs:
           git lfs install --local
           git remote add origin "$PUBLISH_REMOTE"
 
+          # As in gitlab.yml.txt: exclude SenseTime paths and .lic files
+          # from publication. Retain existing DumprX ignore rules if any.
+          cat >> .gitignore <<'DUMP_GITIGNORE'
+          # Firmware dump publishing exclusions (case-insensitive glob classes)
+          *[sS][eE][nN][sS][eE][tT][iI][mM][eE]*
+          *.[lL][iI][cC]
+          DUMP_GITIGNORE
+
           # Always initialize LFS rules before staging firmware content.
+          # Do not track paths that have to be excluded from Git entirely.
           while IFS= read -r -d '' file; do
+            lower="${file,,}"
+            if [[ "$lower" == *sensetime* || "$lower" == *.lic ]]; then
+              continue
+            fi
             git lfs track -- "$file"
           done < <(find . -type f -size +49M -not -path './.git/*' -printf '%P\0')
           touch .gitattributes
-          git add -- README.md .gitattributes
+          git add -- README.md .gitattributes .gitignore
           git commit -m "Initialize firmware dump for $CODENAME"
 
           # Replace only the managed firmware branch, protecting concurrent edits.
@@ -812,8 +866,14 @@ jobs:
             batch_bytes=0
           }
           while IFS= read -r -d '' file; do
-            case "$file" in ./README.md|./.gitattributes) continue ;; esac
+            case "$file" in ./README.md|./.gitattributes|./.gitignore) continue ;; esac
             path="${file#./}"
+            # git add -A -- <ignored-path> exits nonzero on an explicit
+            # ignored file. Skip exclusions in the batched import as well.
+            lower="${path,,}"
+            if [[ "$lower" == *sensetime* || "$lower" == *.lic ]]; then
+              continue
+            fi
             if [[ "$path" == */* ]]; then top="${path%%/*}"; else top='root'; fi
             if [[ "$top" != "$group_label" ]]; then
               flush_batch
