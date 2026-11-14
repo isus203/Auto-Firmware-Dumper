@@ -32,6 +32,10 @@ on:
         description: 'Generate and publish LineageOS device tree to GitLab'
         type: boolean
         default: false
+      UPLOAD_TWRP_DT:
+        description: 'Generate and publish experimental TWRP tree to GitLab'
+        type: boolean
+        default: false
       UPLOAD_FULL_DUMP:
         description: 'Publish full extracted dump to GitLab (turn OFF for >10 GiB Free project)'
         type: boolean
@@ -80,6 +84,7 @@ jobs:
       SEPOLICY_BRANCH: ${{ inputs.SEPOLICY_BRANCH }}
       GENERATE_VENDOR: ${{ inputs.GENERATE_VENDOR }}
       UPLOAD_LINEAGE_DT: ${{ inputs.UPLOAD_LINEAGE_DT }}
+      UPLOAD_TWRP_DT: ${{ inputs.UPLOAD_TWRP_DT }}
       UPLOAD_FULL_DUMP: ${{ inputs.UPLOAD_FULL_DUMP }}
       # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
       DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
@@ -88,6 +93,8 @@ jobs:
       AOSPDTGEN_REF: ${{ vars.AOSPDTGEN_REF || '' }}
       SEPOLICY_DECOMPILER_REPO: ${{ vars.SEPOLICY_DECOMPILER_REPO || 'https://github.com/isus203/SELinux-CIL-Decompiler.git' }}
       SEPOLICY_DECOMPILER_REF: ${{ vars.SEPOLICY_DECOMPILER_REF || '' }}
+      TWRPDTGEN_REPO: ${{ vars.TWRPDTGEN_REPO || 'https://github.com/twrpdtgen/twrpdtgen.git' }}
+      TWRPDTGEN_REF: ${{ vars.TWRPDTGEN_REF || '' }}
       EXTRACT_TOOLS_REF: ${{ vars.EXTRACT_TOOLS_REF || 'lineage-22.1' }}
     steps:
       - name: WARNING - MediaTek (MTK) devices only
@@ -409,11 +416,13 @@ jobs:
           print('Proprietary-files present:', (target / 'proprietary-files.txt').exists())
           PY_TREE
 
-      - name: Extract vendor tree (when requested)
+      - name: Extract vendor tree and generate build files (when requested)
         if: env.GENERATE_VENDOR == 'true'
         run: |
           set -euo pipefail
           android="$GITHUB_WORKSPACE/generated/android"
+          dump="$GITHUB_WORKSPACE/DumprX/out"
+          log="$GITHUB_WORKSPACE/vendor-extraction.log"
           mkdir -p "$android/tools" "$android/prebuilts"
           git clone --depth 1 --branch "$EXTRACT_TOOLS_REF" \
             https://github.com/LineageOS/android_tools_extract-utils.git \
@@ -421,27 +430,107 @@ jobs:
           git clone --depth 1 --branch "$EXTRACT_TOOLS_REF" \
             https://github.com/LineageOS/android_prebuilts_extract-tools.git \
             "$android/prebuilts/extract-tools"
-          # Use the identity declared in ExtractUtilsModule, not generic
-          # ro.product.device (e.g. mssi_64_64only_cn_armv82).
+
+          # Respect the exact device/vendor used by the generated extractor.
           tree_brand="${TREE_BRAND:-$BRAND}"
           tree_codename="${TREE_CODENAME:-$CODENAME}"
           tree_dir="$android/device/$tree_brand/$tree_codename"
+          vendor_dir="$android/vendor/$tree_brand/$tree_codename"
           [[ -d "$tree_dir" ]] || { echo "::error::Device tree missing: $tree_dir"; exit 1; }
-          [[ -f "$tree_dir/proprietary-files.txt" ]] || {
-            echo "::error::Device tree missing proprietary-files.txt: $tree_dir"; exit 1;
+          [[ -s "$tree_dir/proprietary-files.txt" ]] || {
+            echo "::error::Device tree has no populated proprietary-files.txt: $tree_dir"
+            exit 1
           }
+
           cd "$tree_dir"
+          echo "Vendor extraction: device=$tree_brand/$tree_codename" | tee "$log"
+          echo "Proprietary entries: $(grep -cEv '^[[:space:]]*(#|$)' proprietary-files.txt || true)" | tee -a "$log"
           if [[ -f extract-files.py ]]; then
+            # LineageOS Python extract-utils may return exit status 0 even if
+            # process_modules() reports missing blobs and stops BEFORE writing
+            # Android.bp, Android.mk and BoardConfigVendor.mk.
             PYTHONPATH="$android/tools/extract-utils${PYTHONPATH:+:$PYTHONPATH}" \
-              python extract-files.py "$GITHUB_WORKSPACE/DumprX/out"
+              python3 extract-files.py "$dump" 2>&1 | tee -a "$log"
+            if grep -Fq 'Some files failed to process' "$log"; then
+              echo '::error::Vendor extraction is incomplete. See vendor-extraction.log for missing blob paths.'
+              exit 1
+            fi
+
+            # Generate the Make/Soong metadata explicitly (supported by
+            # LineageOS extract-utils 22.1, in addition to its normal run()).
+            PYTHONPATH="$android/tools/extract-utils${PYTHONPATH:+:$PYTHONPATH}" \
+              python3 extract-files.py --regenerate_makefiles "$dump" 2>&1 | tee -a "$log"
           elif [[ -f extract-files.sh ]]; then
-            bash extract-files.sh "$GITHUB_WORKSPACE/DumprX/out"
+            bash extract-files.sh "$dump" 2>&1 | tee -a "$log"
+            # The legacy generator uses a separate setup-makefiles.sh.
+            if [[ -f setup-makefiles.sh ]]; then
+              bash setup-makefiles.sh 2>&1 | tee -a "$log"
+            fi
           else
-            echo '::error::The selected aospdtgen version produced no extract-files.py/sh'
+            echo '::error::The generated tree has no extract-files.py or extract-files.sh'
             exit 1
           fi
-          [[ -d "$android/vendor/$tree_brand/$tree_codename" ]] || {
-            echo "::error::Vendor extraction produced no vendor tree at vendor/$tree_brand/$tree_codename"; exit 1;
+
+          [[ -d "$vendor_dir/proprietary" ]] || {
+            echo "::error::Vendor extraction produced no proprietary/ directory: $vendor_dir"
+            exit 1
+          }
+          blob_count="$(find "$vendor_dir/proprietary" -type f | wc -l)"
+          echo "Extracted regular files: $blob_count" | tee -a "$log"
+          [[ "$blob_count" -gt 0 ]] || {
+            echo '::error::Vendor extraction produced zero regular blob files'
+            exit 1
+          }
+
+          # Do not publish a misleading partial tree containing only
+          # proprietary/ and .gitattributes. The filename of the vendor product
+          # mk can differ between devices (LJ9-vendor.mk, FULL-64-vendor.mk).
+          missing=()
+          [[ -f "$vendor_dir/BoardConfigVendor.mk" ]] || missing+=(BoardConfigVendor.mk)
+          [[ -f "$vendor_dir/Android.bp" || -f "$vendor_dir/Android.mk" ]] || missing+=(Android.bp/Android.mk)
+          if ! find "$vendor_dir" -maxdepth 1 -type f -name '*-vendor.mk' -print -quit | grep -q .; then
+            missing+=('*-vendor.mk')
+          fi
+          echo 'Vendor repository root:' | tee -a "$log"
+          find "$vendor_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tee -a "$log"
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing vendor build files: ${missing[*]}. Check the extraction log, proprietary-files.txt and the aospdtgen extractor."
+            exit 1
+          fi
+          echo 'Vendor tree is complete enough to publish: proprietary files and build metadata exist.'
+
+      - name: Upload vendor extraction diagnostics
+        if: always() && inputs.GENERATE_VENDOR
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor-extraction-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: vendor-extraction.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Generate TWRP tree (when requested)
+        if: env.UPLOAD_TWRP_DT == 'true'
+        run: |
+          set -euo pipefail
+          src="$GITHUB_WORKSPACE/work/twrpdtgen"
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          args=(--depth 1)
+          if [[ -n "$TWRPDTGEN_REF" ]]; then args+=(--branch "$TWRPDTGEN_REF"); fi
+          git clone "${args[@]}" "$TWRPDTGEN_REPO" "$src"
+          test -f "$src/pyproject.toml" || { echo 'Missing twrpdtgen pyproject.toml'; exit 1; }
+          python -m pip install "$src"
+          python -m twrpdtgen --help >/dev/null
+          printf 'twrpdtgen commit: %s\n' "$(git -C "$src" rev-parse HEAD)"
+          dump="$GITHUB_WORKSPACE/DumprX"
+          image="$(find "$dump/out" "$dump/input" -type f -name recovery.img -print -quit 2>/dev/null || true)"
+          if [[ -z "$image" ]]; then
+            image="$(find "$dump/out" "$dump/input" -type f -name boot.img -print -quit 2>/dev/null || true)"
+          fi
+          [[ -n "$image" ]] || { echo 'TWRP generator requires recovery.img or boot.img'; exit 1; }
+          mkdir -p "$GITHUB_WORKSPACE/generated/twrp"
+          ( cd "$GITHUB_WORKSPACE/generated/twrp" && python -m twrpdtgen "$image" )
+          [[ -d "$GITHUB_WORKSPACE/generated/twrp/output" ]] || {
+            echo 'TWRP generator did not produce an output directory'; exit 1;
           }
 
       - name: Finalize firmware-only dump before publishing
