@@ -1,6 +1,6 @@
 # WARNING: This workflow is intended only for MediaTek (MTK) firmware/devices.
 # It is not supported or validated for Qualcomm, Exynos, Unisoc, etc.
-name: Auto Firmware Dumper - MTK Only (GitLab Git + LFS)
+name: Auto Firmware Dumper - MTK Only (GitLab Full Archive + Browse)
 
 on:
   workflow_dispatch:
@@ -37,9 +37,18 @@ on:
         type: boolean
         default: false
       UPLOAD_FULL_DUMP:
-        description: 'Publish full extracted dump to GitLab (turn OFF for >10 GiB Free project)'
+        description: 'Publish MTK dump to GitLab (complete hybrid archive + browsable catalog available)'
         type: boolean
         default: true
+      DUMP_UPLOAD_MODE:
+        description: 'hybrid: full archive in Package Registry + browsing in one project; auto: single if small, otherwise hybrid'
+        type: choice
+        options:
+          - hybrid
+          - auto
+          - single
+          - split
+        default: hybrid
       SEPOLICY_MODE:
         description: 'SELinux mode: versioned API, current macros, or disabled'
         type: choice
@@ -86,6 +95,13 @@ jobs:
       UPLOAD_LINEAGE_DT: ${{ inputs.UPLOAD_LINEAGE_DT }}
       UPLOAD_TWRP_DT: ${{ inputs.UPLOAD_TWRP_DT }}
       UPLOAD_FULL_DUMP: ${{ inputs.UPLOAD_FULL_DUMP }}
+      DUMP_UPLOAD_MODE: ${{ inputs.DUMP_UPLOAD_MODE }}
+      # Hybrid catalog: copy only small original files to the Git tree.
+      GITLAB_HYBRID_REAL_FILE_LIMIT_KIB: ${{ vars.GITLAB_HYBRID_REAL_FILE_LIMIT_KIB || '128' }}
+      GITLAB_HYBRID_GIT_BUDGET_MIB: ${{ vars.GITLAB_HYBRID_GIT_BUDGET_MIB || '256' }}
+      # Leave at least 2 GiB of headroom per project for LFS/Git overhead.
+      GITLAB_DUMP_PART_BUDGET_GIB: ${{ vars.GITLAB_DUMP_PART_BUDGET_GIB || '7.5' }}
+      GITLAB_DUMP_SINGLE_BUDGET_GIB: ${{ vars.GITLAB_DUMP_SINGLE_BUDGET_GIB || '8.0' }}
       # Override these URLs/refs in Settings > Secrets and variables > Actions > Variables.
       DUMPRX_REPO: ${{ vars.DUMPRX_REPO || 'https://github.com/xz529/DumprX.git' }}
       DUMPRX_REF: ${{ vars.DUMPRX_REF || '' }}
@@ -176,6 +192,10 @@ jobs:
           echo "Downloaded firmware size: $(du -h firmware.zip | cut -f1)"
           bash dumper.sh ./firmware.zip
           [[ -d out ]] || { echo '::error::DumprX/out was not created'; exit 1; }
+          # Avoid keeping the original multi-GiB ZIP while generating Git LFS
+          # objects for several independent GitLab projects.
+          rm -f -- firmware.zip
+          df -h "$GITHUB_WORKSPACE"
           if ! find out -type f -name build.prop -print -quit | grep -q .; then
             echo '::error::No build.prop found in extracted firmware'
             exit 1
@@ -632,16 +652,41 @@ jobs:
               return f'{n / (1024**3):.2f} GiB'
           print(f'Files: {n_files}; total: {gib(size_total)}')
           print(f'Files >= 50 MiB: {n_lfs}; estimated LFS: {gib(size_lfs)}')
-          if os.environ.get('PUBLISH_PROVIDER') == 'gitlab' and size_total > 9.5 * 1024**3:
-              print('::warning::Extracted dump is larger than the 10 GiB GitLab Free project quota. '
-                    'Even correctly tracked Git LFS files consume project storage. '
-                    'Set UPLOAD_FULL_DUMP=false to publish only the requested '
-                    'Vendor/Lineage/TWRP trees, or use another archive host.')
+          requested = os.environ.get('DUMP_UPLOAD_MODE', 'auto')
+          publish = os.environ.get('UPLOAD_FULL_DUMP') == 'true'
+          single_budget = float(os.environ['GITLAB_DUMP_SINGLE_BUDGET_GIB']) * 1024**3
+          part_budget = float(os.environ['GITLAB_DUMP_PART_BUDGET_GIB']) * 1024**3
+          if not 0 < single_budget <= 500 * 1024**3 or not 0 < part_budget < 10 * 1024**3:
+              raise SystemExit('::error::Single budget must be <=500 GiB; GitLab Free part budget must be <10 GiB')
+          if not publish:
+              layout = 'off'
+          elif requested == 'auto':
+              layout = 'single' if size_total <= single_budget else 'hybrid'
+          elif requested in ('single', 'split', 'hybrid'):
+              layout = requested
+          else:
+              raise SystemExit('::error::Unknown DUMP_UPLOAD_MODE: ' + requested)
+          if layout == 'single' and size_total > single_budget:
+              raise SystemExit(
+                  f'::error::A single GitLab Free project cannot safely hold '
+                  f'{gib(size_total)} (configured limit {gib(single_budget)}). '
+                  'Select DUMP_UPLOAD_MODE=hybrid/auto/split, or buy GitLab storage.'
+              )
+          with Path(os.environ['GITHUB_ENV']).open('a') as env_file:
+              env_file.write('DUMP_PUBLISH_LAYOUT=' + layout + '\n')
+          print(f'::notice::Dump publication layout: {layout}; '
+                f'single budget {gib(single_budget)}; part budget {gib(part_budget)}')
+          if layout == 'hybrid':
+              print('::notice::The full dump will be uploaded to a new GitLab project as a complete archive plus browsable catalog.')
+          if layout == 'split':
+              print('::notice::The original GitLab firmware project remains untouched. '
+                    'The full dump will be published in independent partXX GitLab projects.')
           summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
           with summary.open('a') as file:
               file.write('### Dump size before upload\n')
               file.write(f'- Extracted files: {n_files}; total: {gib(size_total)}\n')
               file.write(f'- LFS candidates: {n_lfs}; volume: {gib(size_lfs)}\n')
+              file.write(f'- Publication mode: **{layout}**\n')
           if os.environ.get('PUBLISH_PROVIDER') == 'github':
               quota = float(os.environ.get('GITHUB_LFS_QUOTA_GIB', '10'))
               if quota <= 0:
@@ -736,9 +781,41 @@ jobs:
           }
           GITLAB_HELPERS
           source "$RUNNER_TEMP/gitlab_project_api.sh"
+          echo "GITLAB_USERNAME=$username" >> "$GITHUB_ENV"
+          if [[ "${DUMP_PUBLISH_LAYOUT:-off}" != 'single' ]]; then
+            echo "::notice::Firmware layout ${DUMP_PUBLISH_LAYOUT:-off}: base dump repository is not created or pushed."
+            exit 0
+          fi
 
           project_json="$(mktemp)"
           status="$(gitlab_lookup "$username/$repo" "$project_json")"
+          # A small new dump can still fail if the destination project already
+          # contains old LFS objects/history. In auto mode, check existing usage
+          # and publish to new part repositories instead of hitting read-only.
+          if [[ "$status" == 200 && "${DUMP_UPLOAD_MODE:-auto}" == auto ]]; then
+            project_id="$(python3 - "$project_json" <<'PY_ID'
+          import json, sys
+          print(json.load(open(sys.argv[1]))['id'])
+          PY_ID
+          )"
+            stats_json="$(mktemp)"
+            if curl --fail-with-body -sS                 --header "PRIVATE-TOKEN: $GITLAB_TOKEN"                 "$api/projects/$project_id?statistics=true" > "$stats_json"; then
+              used="$(python3 - "$stats_json" <<'PY_USAGE'
+          import json, sys
+          p = json.load(open(sys.argv[1]))
+          stats = p.get('statistics') or {}
+          print(int(stats.get('repository_size') or 0) + int(stats.get('lfs_objects_size') or 0))
+          PY_USAGE
+          )"
+              if (( used > 9 * 1024 * 1024 * 1024 )); then
+                echo "::warning::Existing GitLab repo uses $(numfmt --to=iec "$used") (Git+LFS); using complete archive + browsable catalog."
+                echo 'DUMP_PUBLISH_LAYOUT=hybrid' >> "$GITHUB_ENV"
+                rm -f "$project_json" "$stats_json"
+                exit 0
+              fi
+            fi
+            rm -f "$stats_json"
+          fi
           case "$status" in
             200) echo "Found existing GitLab firmware project (HTTP 200)" ;;
             404)
@@ -967,8 +1044,758 @@ jobs:
               "twrp_device_${tree_brand}_${tree_codename}" "twrp-${tree_codename}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           fi
 
+      - name: Publish complete firmware archive and browsable GitLab catalog
+        if: env.DUMP_PUBLISH_LAYOUT == 'hybrid'
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$GITLAB_TOKEN" ]] || { echo '::error::GITLAB_TOKEN is missing'; exit 1; }
+          source "$RUNNER_TEMP/gitlab_project_api.sh"
+
+          # Use a separate project: the original LJ9 project is already at its Git+LFS quota.
+          repo="android_dump_${BRAND}_${CODENAME}_full"
+          project_json="$(mktemp)"
+          status="$(gitlab_lookup "$GITLAB_USERNAME/$repo" "$project_json")"
+          case "$status" in
+            200) echo "Reusing the hybrid GitLab project: $repo" ;;
+            404)
+              curl -fsS --retry 3 --request POST \
+                --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                --data-urlencode "name=$repo" --data-urlencode "path=$repo" \
+                --data-urlencode 'visibility=public' \
+                --data-urlencode "description=MTK firmware complete archive and browsable file index for ${CODENAME}" \
+                'https://gitlab.com/api/v4/projects' > "$project_json"
+              ;;
+            *) echo "::error::GitLab lookup failed for hybrid project (HTTP $status)"; exit 1 ;;
+          esac
+          mapfile -t project_fields < <(gitlab_canonical_project "$project_json" "$GITLAB_USERNAME")
+          remote="${project_fields[0]}"
+          web_url="${project_fields[1]}"
+          project_id="$(python3 - "$project_json" <<'PY_PROJECT_ID'
+          import json, sys
+          info = json.load(open(sys.argv[1], encoding='utf-8'))
+          if info.get('packages_enabled') is False:
+              raise SystemExit('::error::Package Registry is disabled for this project; enable it in GitLab settings.')
+          print(info['id'])
+          PY_PROJECT_ID
+          )"
+          rm -f "$project_json"
+
+          # Unique version avoids corrupting a previously published snapshot.
+          package_name='firmware-dump'
+          package_version="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          package_base="https://gitlab.com/api/v4/projects/${project_id}/packages/generic/${package_name}/${package_version}"
+          archive_name='firmware.tar.zst'
+          dump="$GITHUB_WORKSPACE/DumprX/out"
+          index="$RUNNER_TEMP/firmware-hybrid-index"
+          mkdir -p "$index"
+          rm -rf "$index"
+          mkdir -p "$index"
+
+          export HYBRID_DUMP="$dump" HYBRID_INDEX="$index"
+          export HYBRID_PROJECT_ID="$project_id" HYBRID_PACKAGE_VERSION="$package_version"
+          export HYBRID_PACKAGE_NAME="$package_name" HYBRID_PROJECT_WEB="$web_url"
+          export HYBRID_REAL_FILE_LIMIT_KIB="${GITLAB_HYBRID_REAL_FILE_LIMIT_KIB:-128}"
+          export HYBRID_GIT_BUDGET_MIB="${GITLAB_HYBRID_GIT_BUDGET_MIB:-256}"
+
+          # Produce a browsable Git tree and complete SHA-256 file catalog.
+          # For large files, create an explicitly labelled .download.md entry rather than
+          # an invalid binary file or a deceptive Git LFS pointer.
+          python3 - <<'PY_BUILD_CATALOG'
+          import hashlib, json, os, shutil, stat
+          from pathlib import Path
+
+          root = Path(os.environ['HYBRID_DUMP'])
+          index = Path(os.environ['HYBRID_INDEX'])
+          real_limit = int(os.environ['HYBRID_REAL_FILE_LIMIT_KIB']) * 1024
+          budget = int(os.environ['HYBRID_GIT_BUDGET_MIB']) * 1024**2
+          if not (0 <= real_limit <= 10 * 1024**2 and 0 < budget <= 1024**3):
+              raise SystemExit('::error::Hybrid Git budget invalid: use <=10 MiB per file and <=1024 MiB total')
+          used = 0
+          entries = []
+          sha_hasher = lambda: hashlib.sha256()
+
+          for directory, dirs, files in os.walk(root, followlinks=False):
+              dirs.sort(); files.sort()
+              srcdir = Path(directory)
+              rel_dir = srcdir.relative_to(root)
+              # Preserve symbolic links to directories without following their contents.
+              linked_dirs = [name for name in dirs if (srcdir / name).is_symlink()]
+              dirs[:] = [name for name in dirs if name not in linked_dirs and name != '.git']
+              for name in files + linked_dirs:
+                  path = srcdir / name
+                  rel = rel_dir / name
+                  if '.git' in rel.parts or rel.parts[0] == 'tmp':
+                      continue
+                  rel_str = rel.as_posix()
+                  destination = index / rel
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  if path.is_symlink():
+                      target = os.readlink(path)
+                      entries.append({'path': rel_str, 'type': 'symlink', 'target': target})
+                      placeholder = destination.with_name(destination.name + '.symlink.md')
+                      placeholder.write_text('# Symbolic link (catalog entry)\n\n'
+                          + f'- Original path: `{rel_str}`\n- Target: `{target}`\n'
+                          + '- The complete symlink is preserved in the package archive.\n', encoding='utf-8')
+                      continue
+                  if not path.is_file():
+                      continue
+                  s = path.stat()
+                  h = sha_hasher()
+                  with path.open('rb') as stream:
+                      for block in iter(lambda: stream.read(4 * 1024**2), b''):
+                          h.update(block)
+                  digest = h.hexdigest()
+                  record = {'path': rel_str, 'type': 'file', 'bytes': s.st_size,
+                            'sha256': digest, 'mode': stat.S_IMODE(s.st_mode)}
+                  entries.append(record)
+                  # Avoid special Git control files and excluded proprietary/license paths
+                  # in the lightweight Git browser; they remain in the COMPLETE archive.
+                  lowercase = rel_str.lower()
+                  can_copy = (s.st_size <= real_limit and used + s.st_size <= budget
+                      and not any(part.startswith('.git') for part in rel.parts)
+                      and 'sensetime' not in lowercase and not lowercase.endswith('.lic')
+                      and rel.name not in ('README.md', 'manifest.json', 'download_full_dump.py'))
+                  if can_copy:
+                      shutil.copy2(path, destination)
+                      used += s.st_size
+                  else:
+                      placeholder = destination.with_name(destination.name + '.download.md')
+                      placeholder.write_text(
+                          '# Archive-only file — catalog entry\n\n'
+                          + f'Original path: `{rel_str}`  \nSize: {s.st_size:,} bytes  \n'
+                          + f'SHA-256: `{digest}`  \n\n'
+                          + 'This is a **catalog page, not the binary file**. '
+                            'Download the complete firmware archive using the root README and restore script.\n',
+                          encoding='utf-8')
+
+          summary = {'schema': 1, 'package_name': os.environ['HYBRID_PACKAGE_NAME'],
+                     'package_version': os.environ['HYBRID_PACKAGE_VERSION'],
+                     'project_id': int(os.environ['HYBRID_PROJECT_ID']),
+                     'project_web_url': os.environ['HYBRID_PROJECT_WEB'],
+                     'archive': 'firmware.tar.zst', 'chunks': [], 'files': entries}
+          (index / 'manifest.json').write_text(json.dumps(summary, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
+          print(f'Catalog: {len(entries)} entries, {used / 1024**2:.1f} MiB of original small files in Git')
+          PY_BUILD_CATALOG
+
+          # Archive uploads are streamed in fixed-size chunks to avoid needing another
+          # 14+ GiB of runner disk. Each finished 900 MiB chunk is uploaded then removed.
+          export HYBRID_PACKAGE_BASE="$package_base"
+          export HYBRID_CHUNK_LOG="$RUNNER_TEMP/firmware-hybrid-chunks.tsv"
+          export HYBRID_CHUNK_TEMP="$RUNNER_TEMP/hybrid-chunk-current"
+          : > "$HYBRID_CHUNK_LOG"
+          cat > "$RUNNER_TEMP/hybrid-upload-chunk.sh" <<'UPLOAD_CHUNK'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          [[ -n "${FILE:-}" ]] || { echo '::error::GNU split did not provide FILE'; exit 1; }
+          name="$(basename "$FILE")"
+          trap 'rm -f -- "$HYBRID_CHUNK_TEMP"' EXIT
+          cat > "$HYBRID_CHUNK_TEMP"
+          size="$(stat -c %s "$HYBRID_CHUNK_TEMP")"
+          digest="$(sha256sum "$HYBRID_CHUNK_TEMP" | awk '{print $1}')"
+          url="$HYBRID_PACKAGE_BASE/$name"
+          response="$(mktemp)"
+          trap 'rm -f -- "$HYBRID_CHUNK_TEMP" "$response"' EXIT
+          # HTTP Basic credentials are not forwarded to a third-party redirected host.
+          status="$(curl -sS --fail-with-body --retry 4 --retry-delay 5 --location \
+            --user "ci:$GITLAB_TOKEN" --upload-file "$HYBRID_CHUNK_TEMP" \
+            -o "$response" -w '%{http_code}' "$url")"
+          if [[ "$status" != 201 ]]; then
+            echo "::error::Package upload failed for $name (HTTP $status)"
+            cat "$response"
+            exit 1
+          fi
+          printf '%s\t%s\t%s\n' "$name" "$size" "$digest" >> "$HYBRID_CHUNK_LOG"
+          echo "Uploaded $name ($(numfmt --to=iec "$size"), sha256=${digest:0:12}...)"
+          UPLOAD_CHUNK
+          chmod +x "$RUNNER_TEMP/hybrid-upload-chunk.sh"
+
+          printf 'Creating and streaming complete firmware archive from %s\n' "$dump"
+          # This is a *post-cleanup* dump; symlinks stay symlinks, even if they point
+          # outside the tree. tar includes original file bytes including .lic/SenseTime.
+          tar --format=posix --sort=name --exclude='./.git' -C "$dump" -cf - . \
+            | zstd -T2 -5 -c \
+            | split -b 900M -d -a 3 --filter="$RUNNER_TEMP/hybrid-upload-chunk.sh" \
+              - "$RUNNER_TEMP/firmware.tar.zst.part"
+
+          # Insert the uploaded package checksums into the manifest and generate a
+          # portable, tested-at-build-time restore tool (Python 3 + tar + zstd).
+          python3 - <<'PY_FINISH_CATALOG'
+          import json, os
+          from pathlib import Path
+
+          path = Path(os.environ['HYBRID_INDEX']) / 'manifest.json'
+          manifest = json.loads(path.read_text(encoding='utf-8'))
+          for line in Path(os.environ['HYBRID_CHUNK_LOG']).read_text().splitlines():
+              name, size, digest = line.split('\t')
+              manifest['chunks'].append({'filename': name, 'bytes': int(size), 'sha256': digest})
+          if not manifest['chunks']:
+              raise SystemExit('::error::Archive split produced no uploaded chunks')
+          path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True) + '\n')
+          readme = f'''# Full MediaTek firmware dump — {os.environ['CODENAME']}
+
+          This single GitLab project contains **both** a directory-by-directory firmware
+          catalog and a **complete, checksum-verified snapshot** in Package Registry.
+
+          - Browse normal directories (`system/`, `vendor/`, `product/`, etc.) in this Git repo.
+          - Small files are present in their original form when they fit the lightweight budget.
+          - Large/binary entries named `*.download.md` are **catalog entries**; they are **not** firmware binaries.
+          - A manifest lists **all** files with original paths, byte counts and SHA-256 values.
+          - The complete set of firmware files and symbolic links lives in the `.tar.zst` archive.
+          - Generated device trees are published separately, not in the firmware archive.
+          - The archive reflects the workflow's firmware-only cleanup (e.g. generated trees,
+            broken symlinks and duplicate SELinux inputs are omitted).
+
+          ## Get the complete restored dump
+
+          Requires Python 3, GNU tar and `zstd` (`sudo apt install zstd` on Ubuntu).
+
+          ```bash
+          python3 download_full_dump.py --output dump
+          ```
+
+          This fetches all archive chunks from GitLab Package Registry, validates their
+          SHA-256 checksums, restores the firmware, and validates the file inventory.
+
+          Package version: `{manifest['package_version']}`; archive chunks: {len(manifest['chunks'])}.
+          [Package registry]({manifest['project_web_url']}/-/packages).
+
+          GitLab.com Free limits Git+LFS to 10 GiB per project. This catalog avoids
+          presenting archive-only files as real Git binaries and uses Package Registry
+          for the complete dataset. Registry service limits/availability still apply.
+          '''
+          (Path(os.environ['HYBRID_INDEX']) / 'README.md').write_text(readme, encoding='utf-8')
+          PY_FINISH_CATALOG
+
+          cat > "$index/download_full_dump.py" <<'PY_DOWNLOAD'
+          #!/usr/bin/env python3
+          """Download, restore and SHA-256 verify the full MTK firmware dump."""
+          import argparse
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import sys
+          import urllib.request
+
+          HERE = Path(__file__).resolve().parent
+
+          def digest_file(path):
+              h = hashlib.sha256()
+              with path.open('rb') as stream:
+                  for block in iter(lambda: stream.read(4 * 1024**2), b''):
+                      h.update(block)
+              return h.hexdigest()
+
+          def download(url, destination):
+              # Public project packages are retrieved without credentials; redirects to
+              # object storage do not receive a PRIVATE-TOKEN header.
+              with urllib.request.urlopen(url, timeout=120) as response, destination.open('wb') as target:
+                  shutil.copyfileobj(response, target, 4 * 1024**2)
+
+          def main():
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument('--output', default='dump', help='Extraction directory')
+              parser.add_argument('--cache', default='firmware-chunks', help='Chunk cache')
+              parser.add_argument('--verify-only', action='store_true', help='Verify already restored files')
+              args = parser.parse_args()
+              manifest = json.loads((HERE / 'manifest.json').read_text(encoding='utf-8'))
+              output = Path(args.output).resolve()
+              cache = Path(args.cache).resolve()
+              files = manifest['files']
+              if not args.verify_only:
+                  if shutil.which('zstd') is None or shutil.which('tar') is None:
+                      parser.error('GNU tar and zstd are required for restoration')
+                  output.mkdir(parents=True, exist_ok=True)
+                  cache.mkdir(parents=True, exist_ok=True)
+                  chunks = []
+                  for item in manifest['chunks']:
+                      dest = cache / item['filename']
+                      url = ('https://gitlab.com/api/v4/projects/{}/packages/generic/{}/{}/{}'
+                          .format(manifest['project_id'], manifest['package_name'],
+                                  manifest['package_version'], item['filename']))
+                      if not (dest.is_file() and dest.stat().st_size == item['bytes']
+                              and digest_file(dest) == item['sha256']):
+                          print('Downloading', item['filename'], flush=True)
+                          temp = dest.with_name(dest.name + '.download')
+                          try:
+                              download(url, temp)
+                              if temp.stat().st_size != item['bytes'] or digest_file(temp) != item['sha256']:
+                                  raise RuntimeError('Bad archive chunk checksum: ' + item['filename'])
+                              temp.replace(dest)
+                          finally:
+                              temp.unlink(missing_ok=True)
+                      print('Verified chunk:', item['filename'], flush=True)
+                      chunks.append(str(dest))
+                  # Stream directly into tar: no assembled 14+ GiB intermediate file.
+                  with subprocess.Popen(['cat', *chunks], stdout=subprocess.PIPE) as cat:
+                      with subprocess.Popen(['zstd', '-dc'], stdin=cat.stdout, stdout=subprocess.PIPE) as zstd:
+                          cat.stdout.close()
+                          with subprocess.Popen(['tar', '--no-same-owner', '-xf', '-', '-C', str(output)],
+                                                stdin=zstd.stdout) as tar:
+                              zstd.stdout.close()
+                              if tar.wait() != 0 or zstd.wait() != 0 or cat.wait() != 0:
+                                  raise RuntimeError('Archive extraction failed')
+              errors = []
+              for entry in files:
+                  relative = Path(entry['path'])
+                  # Ignore malformed paths rather than allowing escape outside output.
+                  if relative.is_absolute() or '..' in relative.parts:
+                      raise RuntimeError('Unsafe path in manifest: ' + entry['path'])
+                  item = output / relative
+                  if entry['type'] == 'symlink':
+                      if not item.is_symlink() or os.readlink(item) != entry['target']:
+                          errors.append(entry['path'] + ' (symbolic link)')
+                  elif item.is_symlink() or not item.is_file():
+                      errors.append(entry['path'] + ' (missing / incorrect file type)')
+                  elif item.stat().st_size != entry['bytes'] or digest_file(item) != entry['sha256']:
+                      errors.append(entry['path'] + ' (size / SHA-256 mismatch)')
+                  if len(errors) >= 20:
+                      break
+              if errors:
+                  raise RuntimeError('Verification failed:\n' + '\n'.join(errors))
+              print('RESTORED + VERIFIED:', len(files), 'files/symlinks in', output)
+
+          if __name__ == '__main__':
+              try:
+                  main()
+              except Exception as exc:
+                  sys.exit('ERROR: ' + str(exc))
+          PY_DOWNLOAD
+          chmod +x "$index/download_full_dump.py"
+          python3 -m py_compile "$index/download_full_dump.py"
+          rm -rf "$index/__pycache__"
+
+          (
+            cd "$index"
+            # Reserved branch contains the browsable snapshot and *only* lightweight data.
+            git init -b "$DUMP_BRANCH"
+            git config user.name "${USER_NAME:-github-actions[bot]}"
+            git config user.email "$GIT_AUTHOR_EMAIL"
+            git config pack.threads 2
+            git add -A
+            git commit -m "Catalog complete MTK $CODENAME firmware; package $package_version"
+            git remote add origin "$remote"
+            remote_line="$(git ls-remote --heads origin "refs/heads/$DUMP_BRANCH")"
+            remote_oid="${remote_line%%$'\t'*}"
+            if [[ -n "$remote_line" ]]; then
+              git push --force-with-lease="refs/heads/$DUMP_BRANCH:$remote_oid" \
+                -u origin "HEAD:refs/heads/$DUMP_BRANCH"
+            else
+              git push -u origin "HEAD:refs/heads/$DUMP_BRANCH"
+            fi
+          )
+          {
+            echo '### Complete firmware + GitLab browsing (hybrid mode)'
+            echo "- Project: $web_url"
+            echo "- Browse: $web_url/-/tree/$DUMP_BRANCH"
+            echo "- Package version: $package_version"
+            echo '- Restore: python3 download_full_dump.py --output dump'
+            echo '- Real small files appear in the Git tree; large binaries have clearly labelled catalog entries.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish oversized firmware dump as independent GitLab part repositories
+        if: env.DUMP_PUBLISH_LAYOUT == 'split'
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "${GITLAB_USERNAME:-}" ]] || { echo '::error::Missing GitLab username'; exit 1; }
+          source "$RUNNER_TEMP/gitlab_project_api.sh"
+          dump="$GITHUB_WORKSPACE/DumprX/out"
+          repo_prefix="android_dump_${BRAND}_${CODENAME}"
+          plan="$RUNNER_TEMP/dump_part_plan.json"
+          uploads="$RUNNER_TEMP/dump_part_uploads.jsonl"
+          : > "$uploads"
+
+          # GitLab Free gives each project up to 10 GiB combined Git+LFS.
+          # The plan uses smaller, deterministic bins; every stored file keeps
+          # its original dump-relative path for a later lossless merge.
+          python3 - "$dump" "$plan" "$repo_prefix" <<'PY_PLAN'
+          import json
+          import os
+          import sys
+          from collections import defaultdict
+          from pathlib import Path
+
+          root, output, prefix = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+          max_bytes = int(float(os.environ['GITLAB_DUMP_PART_BUDGET_GIB']) * (1024 ** 3))
+          if max_bytes < 1024**3 or max_bytes >= 10 * 1024**3:
+              raise SystemExit('::error::GITLAB_DUMP_PART_BUDGET_GIB must be >=1 and <10')
+          groups = defaultdict(list)
+          for here, directories, filenames in os.walk(root, followlinks=False):
+              # os.walk lists symlinks to directories in directories, not in
+              # filenames. Include those links as original dump entries.
+              linked_directories = [name for name in directories
+                                    if (Path(here) / name).is_symlink()]
+              directories[:] = sorted(
+                  name for name in directories
+                  if name not in ('.git', 'tmp')
+                  and 'sensetime' not in name.lower()
+                  and name not in linked_directories
+              )
+              for name in sorted(filenames + linked_directories):
+                  file = Path(here) / name
+                  relative = file.relative_to(root).as_posix()
+                  if ('sensetime' in relative.lower()
+                          or name.lower().endswith('.lic')
+                          or relative in ('.gitignore', '.gitattributes')
+                          or '/.git/' in '/' + relative + '/'):
+                      continue
+                  if not (file.is_file() or file.is_symlink()):
+                      continue
+                  is_link = file.is_symlink()
+                  size = len(os.readlink(file).encode()) if is_link else file.stat().st_size
+                  if size > max_bytes:
+                      raise SystemExit(
+                          f'::error::{relative} ({size / 1024**3:.2f} GiB) '
+                          f'exceeds per-project budget {max_bytes / 1024**3:.2f} GiB. '
+                          'Use external object storage or increase GitLab quota.'
+                      )
+                  groups[relative.split('/', 1)[0]].append({
+                      'path': relative, 'bytes': size, 'symlink': is_link
+                  })
+
+          # Prefer keeping a complete top-level firmware partition together.
+          # Split within a partition only when it cannot fit in one project.
+          bins = []
+          def allocate(entries):
+              total = sum(item['bytes'] for item in entries)
+              for part in bins:
+                  if part['bytes'] + total <= max_bytes:
+                      part['files'].extend(entries)
+                      part['bytes'] += total
+                      return
+              bins.append({'files': list(entries), 'bytes': total})
+
+          group_sorted = sorted(
+              groups.items(),
+              key=lambda pair: (-sum(item['bytes'] for item in pair[1]), pair[0])
+          )
+          for name, entries in group_sorted:
+              total = sum(item['bytes'] for item in entries)
+              if total <= max_bytes:
+                  allocate(entries)
+              else:
+                  for item in sorted(entries, key=lambda x: (-x['bytes'], x['path'])):
+                      allocate([item])
+
+          if not bins:
+              raise SystemExit('::error::Nothing to publish in the firmware dump')
+          parts = []
+          for number, part in enumerate(bins, 1):
+              if number > 99:
+                  raise SystemExit('::error::More than 99 part repositories required')
+              repo = f'{prefix}_part{number:02d}'
+              part['files'].sort(key=lambda entry: entry['path'])
+              parts.append({
+                  'number': number,
+                  'repo': repo,
+                  'bytes': part['bytes'],
+                  'files': part['files'],
+              })
+          result = {
+              'codename': os.environ['CODENAME'],
+              'branch': os.environ['DUMP_BRANCH'],
+              'total_bytes': sum(part['bytes'] for part in parts),
+              'part_budget_bytes': max_bytes,
+              'parts': parts,
+          }
+          output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + '\n')
+          print('Publishing full firmware dump across these GitLab projects:')
+          for part in parts:
+              print(f"  {part['repo']}: {part['bytes'] / 1024**3:.2f} GiB, "
+                    f"{len(part['files'])} entries")
+          PY_PLAN
+
+          publish_part() {
+            local number="$1" repo="" stage="" branch="$DUMP_BRANCH"
+            local tree_json status info remote web_url project_path
+            local -a project_fields
+            repo="$(python3 - "$plan" "$number" <<'PY_PART_NAME'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          print(d['parts'][int(sys.argv[2])-1]['repo'])
+          PY_PART_NAME
+          )"
+            stage="$RUNNER_TEMP/firmware-part-$number"
+            rm -rf -- "$stage"
+            mkdir -p "$stage"
+            PART_NO="$number" PART_STAGE="$stage" python3 - "$dump" "$plan" <<'PY_STAGE'
+          import errno
+          import json
+          import os
+          import shutil
+          import sys
+          from pathlib import Path
+
+          root, plan = Path(sys.argv[1]), json.load(open(sys.argv[2]))
+          index = int(os.environ['PART_NO']) - 1
+          part = plan['parts'][index]
+          stage = Path(os.environ['PART_STAGE'])
+          for entry in part['files']:
+              source = root / entry['path']
+              dest = stage / entry['path']
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              if entry['symlink']:
+                  dest.symlink_to(os.readlink(source))
+              else:
+                  try:
+                      os.link(source, dest)
+                  except OSError as ex:
+                      if ex.errno not in (errno.EXDEV, errno.EPERM):
+                          raise
+                      shutil.copy2(source, dest)
+          (stage / f'README-PART-{part["number"]:02d}.md').write_text(
+              f'# Firmware dump part {part["number"]} of {len(plan["parts"])}\n\n'
+              'This repository contains only a part of the original MTK dump. '
+              'Keep file paths unchanged and merge all part repositories '\
+              'before running extract tools. The index repository provides a manifest.\n'
+          )
+          PY_STAGE
+
+            (
+              cd "$stage"
+              git init -b "$branch"
+              git config user.name "${USER_NAME:-github-actions[bot]}"
+              git config user.email "$GIT_AUTHOR_EMAIL"
+              git config pack.threads 2
+              git lfs install --local
+              while IFS= read -r -d '' file; do
+                git lfs track -- "${file#./}"
+              done < <(find . -type f -size +49M -not -path './.git/*' -print0)
+              touch .gitattributes
+              git add -- .gitattributes "README-PART-$(printf '%02d' "$number").md"
+              git commit -m "Initialize $repo split firmware dump"
+            )
+
+            tree_json="$(mktemp)"
+            status="$(gitlab_lookup "$GITLAB_USERNAME/$repo" "$tree_json")"
+            case "$status" in
+              200) echo "Existing GitLab part repository: $repo" ;;
+              404)
+                curl --fail-with-body -sS --request POST \
+                  --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                  --data-urlencode "name=$repo" --data-urlencode "path=$repo" \
+                  --data-urlencode 'visibility=public' \
+                  --data-urlencode "description=MTK firmware dump part $number; see ${repo_prefix}_index for merge instructions" \
+                  'https://gitlab.com/api/v4/projects' > "$tree_json" ;;
+              *) echo "::error::GitLab lookup HTTP $status for part repo $repo"; return 1 ;;
+            esac
+            info="$(gitlab_canonical_project "$tree_json" "$GITLAB_USERNAME")"
+            mapfile -t project_fields <<< "$info"
+            rm -f -- "$tree_json"
+            remote="${project_fields[0]}"
+            web_url="${project_fields[1]}"
+            project_path="${project_fields[2]}"
+            (
+              cd "$stage"
+              git remote add origin "$remote"
+              git config "lfs.${web_url}.git/info/lfs.locksverify" false
+              local remote_line remote_oid
+              remote_line="$(git ls-remote --heads origin "refs/heads/$branch")"
+              remote_oid="${remote_line%%$'\t'*}"
+              if [[ -n "$remote_line" ]]; then
+                git push --force-with-lease="refs/heads/$branch:$remote_oid" \
+                  -u origin "HEAD:refs/heads/$branch"
+              else
+                git push -u origin "HEAD:refs/heads/$branch"
+              fi
+
+              # Keep Git pushes bounded; Git LFS files are uploaded first.
+              local batch_count=0 batch_bytes=0 batch_limit=$((320 * 1024 * 1024))
+              local file bytes
+              flush_part_batch() {
+                if (( batch_count == 0 )); then return; fi
+                if ! git diff --cached --quiet; then
+                  git commit -m "Import $repo firmware batch"
+                  git lfs push origin "$branch"
+                  git push origin "HEAD:refs/heads/$branch"
+                fi
+                batch_count=0
+                batch_bytes=0
+              }
+              while IFS= read -r -d '' file; do
+                case "$file" in
+                  ./README-PART-*.md|./.gitattributes) continue ;;
+                esac
+                bytes="$(stat -c %s -- "$file")"
+                if (( batch_count > 0 && (batch_bytes + bytes > batch_limit || batch_count >= 240) )); then
+                  flush_part_batch
+                fi
+                git add -- "$file"
+                batch_count=$((batch_count + 1))
+                batch_bytes=$((batch_bytes + bytes))
+              done < <(find . -path './.git' -prune -o \
+                \( -type f -o -type l \) -print0 | sort -z)
+              flush_part_batch
+              git add -A
+              if ! git diff --cached --quiet; then
+                git commit -m "Complete $repo firmware import"
+                git lfs push origin "$branch"
+                git push origin "HEAD:refs/heads/$branch"
+              fi
+            )
+            PART_NUMBER="$number" PART_WEB_URL="$web_url" PART_PROJECT_PATH="$project_path" \
+              PART_REPO="$repo" python3 - "$uploads" <<'PY_UPLOAD_RECORD'
+          import json, os, sys
+          with open(sys.argv[1], 'a') as stream:
+              stream.write(json.dumps({
+                  'number': int(os.environ['PART_NUMBER']),
+                  'repo': os.environ['PART_REPO'],
+                  'web_url': os.environ['PART_WEB_URL'],
+                  'path': os.environ['PART_PROJECT_PATH']
+              }) + '\n')
+          PY_UPLOAD_RECORD
+            rm -rf -- "$stage"
+            echo "::notice::Published split part $number: $web_url"
+          }
+
+          while IFS= read -r number; do
+            publish_part "$number"
+          done < <(python3 - "$plan" <<'PY_PART_LIST'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          for p in d['parts']:
+              print(p['number'])
+          PY_PART_LIST
+          )
+
+          # A small independent index links all parts, so a full reconstruction
+          # does not depend on the legacy dump repo that is already read-only.
+          index_repo="${repo_prefix}_index"
+          index_stage="$RUNNER_TEMP/firmware-index"
+          rm -rf "$index_stage"
+          mkdir -p "$index_stage"
+          INDEX_STAGE="$index_stage" python3 - "$plan" "$uploads" <<'PY_INDEX'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          data = json.load(open(sys.argv[1]))
+          remotes = {line['number']: line for line in
+                     (json.loads(x) for x in open(sys.argv[2]) if x.strip())}
+          index = Path(os.environ['INDEX_STAGE'])
+          manifest = {
+              'device': data['codename'],
+              'branch': data['branch'],
+              'total_bytes': data['total_bytes'],
+              'parts': [
+                  {'number': part['number'], 'repository': remotes[part['number']]['web_url'],
+                   'branch': data['branch'], 'bytes': part['bytes'],
+                   'entries': len(part['files'])}
+                  for part in data['parts']
+              ],
+              'files': [
+                  {'path': entry['path'], 'part': part['number'],
+                   'bytes': entry['bytes'], 'symlink': entry['symlink']}
+                  for part in data['parts'] for entry in part['files']
+              ],
+          }
+          (index / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n')
+          lines = [
+              f'# MediaTek {data["codename"]} firmware dump — split index',
+              '',
+              'GitLab Free projects are limited to 10 GiB for Git + LFS combined. '
+              'The original dump has been split across independent repositories.',
+              '',
+              '## Parts',
+          ]
+          for part in manifest['parts']:
+              lines.append(f'- [Part {part["number"]:02d}]({part["repository"]}): '
+                           f'{part["bytes"] / 1024**3:.2f} GiB, {part["entries"]} entries')
+          lines.extend([
+              '', '## Reassemble on Linux', '',
+              'Install Git LFS and rsync. Clone all parts and copy their contents '
+              'into one directory **with their original relative paths**:', '',
+              '```bash', 'git lfs install', 'mkdir -p firmware-merged',
+          ])
+          for part in manifest['parts']:
+              lines.append(
+                  f'git clone --branch {data["branch"]} --single-branch '
+                  f'{part["repository"]}.git firmware-part{part["number"]:02d}'
+              )
+              lines.append(
+                  f'rsync -a --exclude=.git --exclude=README-PART-*.md '
+                  f'firmware-part{part["number"]:02d}/ firmware-merged/'
+              )
+          lines.extend(['```', '',
+                        'Run `python3 verify_dump.py firmware-merged` '
+                        'to check all expected paths and file sizes.',
+                        '', 'Working symlinks that reference another part '
+                        'become valid after the merge.',
+                        '', 'This index preserves a complete file list but '
+                        'does not contain the firmware binary files itself.', ''])
+          (index / 'README.md').write_text('\n'.join(lines))
+          (index / 'verify_dump.py').write_text('''#!/usr/bin/env python3
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          manifest = json.loads((Path(__file__).parent / 'manifest.json').read_text())
+          root = Path(sys.argv[1])
+          failures = []
+          for item in manifest['files']:
+              file = root / item['path']
+              if not os.path.lexists(file):
+                  failures.append('MISSING: ' + item['path'])
+              elif bool(file.is_symlink()) != item['symlink']:
+                  failures.append('TYPE: ' + item['path'])
+              elif not item['symlink'] and file.stat().st_size != item['bytes']:
+                  failures.append('SIZE: ' + item['path'])
+          for error in failures[:100]:
+              print(error)
+          print(f"Checked {len(manifest['files'])} paths; failures: {len(failures)}")
+          raise SystemExit(1 if failures else 0)
+          ''')
+          PY_INDEX
+
+          tree_json="$(mktemp)"
+          status="$(gitlab_lookup "$GITLAB_USERNAME/$index_repo" "$tree_json")"
+          case "$status" in
+            200) echo "Updating firmware split index: $index_repo" ;;
+            404)
+              curl --fail-with-body -sS --request POST \
+                --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                --data-urlencode "name=$index_repo" --data-urlencode "path=$index_repo" \
+                --data-urlencode 'visibility=public' \
+                --data-urlencode "description=Index for split MediaTek (MTK) firmware dump $CODENAME" \
+                'https://gitlab.com/api/v4/projects' > "$tree_json" ;;
+            *) echo "::error::GitLab lookup HTTP $status for firmware index"; exit 1 ;;
+          esac
+          mapfile -t index_fields < <(gitlab_canonical_project "$tree_json" "$GITLAB_USERNAME")
+          rm -f "$tree_json"
+          (
+            cd "$index_stage"
+            git init -b "$DUMP_BRANCH"
+            git config user.name "${USER_NAME:-github-actions[bot]}"
+            git config user.email "$GIT_AUTHOR_EMAIL"
+            git add -A
+            git commit -m "Index split firmware dump for $CODENAME"
+            git remote add origin "${index_fields[0]}"
+            remote_line="$(git ls-remote --heads origin "refs/heads/$DUMP_BRANCH")"
+            remote_oid="${remote_line%%$'\t'*}"
+            if [[ -n "$remote_line" ]]; then
+              git push --force-with-lease="refs/heads/$DUMP_BRANCH:$remote_oid" \
+                -u origin "HEAD:refs/heads/$DUMP_BRANCH"
+            else
+              git push -u origin "HEAD:refs/heads/$DUMP_BRANCH"
+            fi
+          )
+          {
+            echo '### Full firmware dump published as multiple GitLab projects'
+            echo "- Index: ${index_fields[1]}/-/tree/$DUMP_BRANCH"
+            echo '- Existing full-dump project was not modified.'
+            echo '- All original dump paths are preserved; reassemble using index instructions.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload firmware dump with Git and LFS
-        if: env.UPLOAD_FULL_DUMP == 'true'
+        if: env.DUMP_PUBLISH_LAYOUT == 'single'
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/DumprX/out"
