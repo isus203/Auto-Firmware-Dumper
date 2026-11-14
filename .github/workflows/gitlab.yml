@@ -670,26 +670,104 @@ jobs:
           api=https://gitlab.com/api/v4
           user_json="$(curl -fsS --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$api/user")"
           username="$(printf '%s' "$user_json" | python -c 'import sys,json; print(json.load(sys.stdin)["username"])')"
-          encoded="$(printf '%s' "$username/$repo" | python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
-          status="$(curl -sS -o /dev/null -w '%{http_code}' \
-            --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$api/projects/$encoded")"
-          if [[ "$status" == 404 ]]; then
-            curl --fail-with-body -sS --request POST \
-              --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-              --data-urlencode "name=$repo" --data-urlencode "path=$repo" \
-              --data-urlencode 'visibility=public' \
-              --data-urlencode 'description=MediaTek (MTK) firmware dump. For MTK devices only.' \
-              "$api/projects" >/dev/null
-          elif [[ "$status" != 200 ]]; then
-            echo "GitLab lookup failed (HTTP $status)"; exit 1
+          # GitLab returns HTTP 301 for projects renamed/moved to another path.
+          # Only follow redirects back into GitLab's Projects API, so the
+          # PRIVATE-TOKEN header is never forwarded to another host.
+          cat > "$RUNNER_TEMP/gitlab_project_api.sh" <<'GITLAB_HELPERS'
+          gitlab_lookup() {
+            local full_path="$1" output="$2" encoded url headers status location attempt
+            encoded="$(printf '%s' "$full_path" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))')"
+            url="https://gitlab.com/api/v4/projects/$encoded"
+            headers="$(mktemp)"
+            for attempt in 1 2 3 4 5; do
+              if ! status="$(curl -sS -D "$headers" -o "$output" -w '%{http_code}' \
+                  --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$url")"; then
+                rm -f "$headers"
+                return 1
+              fi
+              case "$status" in
+                301|302|307|308)
+                  location="$(sed -n '/^[Ll]ocation:/ { s/^[^:]*:[[:space:]]*//; s/\r$//; p; }' "$headers" | tail -n 1)"
+                  if [[ "$location" == /api/v4/projects/* ]]; then
+                    location="https://gitlab.com$location"
+                  fi
+                  if [[ "$location" != https://gitlab.com/api/v4/projects/* ]]; then
+                    echo "::error::Refusing unsafe GitLab API redirect: $location" >&2
+                    rm -f "$headers"
+                    return 1
+                  fi
+                  echo "::notice::GitLab API returned HTTP $status; following project redirect." >&2
+                  url="$location"
+                  ;;
+                *)
+                  rm -f "$headers"
+                  printf '%s\n' "$status"
+                  return 0
+                  ;;
+              esac
+            done
+            rm -f "$headers"
+            echo '::error::GitLab project lookup exceeded five redirects' >&2
+            return 1
+          }
+
+          gitlab_canonical_project() {
+            local json="$1" owner="$2"
+            python3 - "$json" "$owner" <<'PY_PROJECT'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding='utf-8') as stream:
+              project = json.load(stream)
+          owner = sys.argv[2]
+          full_path = project['path_with_namespace']
+          ssh_url = project['ssh_url_to_repo']
+          web_url = project['web_url']
+          if not full_path.startswith(owner + '/'):
+              raise SystemExit('::error::Resolved project is outside the authenticated GitLab namespace: ' + full_path)
+          if ssh_url != 'git@gitlab.com:' + full_path + '.git':
+              raise SystemExit('::error::Unexpected GitLab SSH remote: ' + ssh_url)
+          if web_url != 'https://gitlab.com/' + full_path:
+              raise SystemExit('::error::Unexpected GitLab project web URL: ' + web_url)
+          print(ssh_url)
+          print(web_url)
+          print(full_path)
+          PY_PROJECT
+          }
+          GITLAB_HELPERS
+          source "$RUNNER_TEMP/gitlab_project_api.sh"
+
+          project_json="$(mktemp)"
+          status="$(gitlab_lookup "$username/$repo" "$project_json")"
+          case "$status" in
+            200) echo "Found existing GitLab firmware project (HTTP 200)" ;;
+            404)
+              echo "GitLab firmware project not found; creating $username/$repo"
+              curl --fail-with-body -sS --request POST \
+                --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                --data-urlencode "name=$repo" --data-urlencode "path=$repo" \
+                --data-urlencode 'visibility=public' \
+                --data-urlencode 'description=MediaTek (MTK) firmware dump. For MTK devices only.' \
+                "$api/projects" > "$project_json"
+              ;;
+            *) echo "::error::GitLab lookup failed (HTTP $status)"; exit 1 ;;
+          esac
+          project_info="$(gitlab_canonical_project "$project_json" "$username")"
+          mapfile -t project_fields <<< "$project_info"
+          remote="${project_fields[0]}"
+          web_url="${project_fields[1]}"
+          canonical_path="${project_fields[2]}"
+          rm -f "$project_json"
+          if [[ "$canonical_path" != "$username/$repo" ]]; then
+            echo "::notice::Project is now $canonical_path (requested $username/$repo); using canonical GitLab remote."
           fi
           {
             echo "GITLAB_USERNAME=$username"
-            echo "PUBLISH_REMOTE=git@gitlab.com:$username/$repo.git"
-            echo "PUBLISH_WEB_URL=https://gitlab.com/$username/$repo"
-            echo "PUBLISH_BRANCH_URL=https://gitlab.com/$username/$repo/-/tree/$DUMP_BRANCH"
+            echo "PUBLISH_REMOTE=$remote"
+            echo "PUBLISH_WEB_URL=$web_url"
+            echo "PUBLISH_BRANCH_URL=$web_url/-/tree/$DUMP_BRANCH"
           } >> "$GITHUB_ENV"
-          echo "Repository: https://gitlab.com/$username/$repo"
+          echo "Repository: $web_url"
 
       - name: Configure SSH for GitLab
         env:
@@ -714,6 +792,7 @@ jobs:
           tree_brand="${TREE_BRAND:-$BRAND}"
           tree_codename="${TREE_CODENAME:-$CODENAME}"
           api='https://gitlab.com/api/v4'
+          source "$RUNNER_TEMP/gitlab_project_api.sh"
 
           publish_tree() {
             local source="$1" repo="$2" branch="$3"
@@ -836,11 +915,10 @@ jobs:
             )
 
             # Only now resolve/create the GitLab repository.
-            local encoded status
-            encoded="$(printf '%s' "${GITLAB_USERNAME}/${repo}" |
-              python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(),safe=""))')"
-            status="$(curl -sS -o /dev/null -w '%{http_code}' \
-              --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "$api/projects/$encoded")"
+            local status tree_json tree_info
+            local -a tree_fields
+            tree_json="$(mktemp)"
+            status="$(gitlab_lookup "${GITLAB_USERNAME}/${repo}" "$tree_json")"
             case "$status" in
               200) echo "GitLab tree repository exists: $repo" ;;
               404)
@@ -850,19 +928,25 @@ jobs:
                   --data-urlencode "path=$repo" \
                   --data-urlencode 'visibility=public' \
                   --data-urlencode "description=MediaTek (MTK) device tree for $tree_codename" \
-                  "$api/projects" >/dev/null ;;
+                  "$api/projects" > "$tree_json" ;;
               *) echo "::error::GitLab project lookup returned HTTP $status for $repo"; return 1 ;;
             esac
+            tree_info="$(gitlab_canonical_project "$tree_json" "$GITLAB_USERNAME")"
+            mapfile -t tree_fields <<< "$tree_info"
+            rm -f "$tree_json"
+            if [[ "${tree_fields[2]}" != "${GITLAB_USERNAME}/${repo}" ]]; then
+              echo "::notice::GitLab tree project moved to ${tree_fields[2]}; using canonical path."
+            fi
 
             (
               cd "$source"
-              git remote add origin "git@gitlab.com:${GITLAB_USERNAME}/${repo}.git"
+              git remote add origin "${tree_fields[0]}"
               # LFS uploads occur over the GitLab LFS transport using the
               # configured SSH identity. Upload objects before the Git ref.
               git lfs push origin "$branch"
               git push -u origin "HEAD:refs/heads/$branch"
             )
-            echo "- [$repo](https://gitlab.com/$GITLAB_USERNAME/$repo/-/tree/$branch)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- [$repo](${tree_fields[1]}/-/tree/$branch)" >> "$GITHUB_STEP_SUMMARY"
           }
 
           if [[ "$GENERATE_VENDOR" == 'true' ]]; then
