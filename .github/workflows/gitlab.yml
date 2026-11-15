@@ -28,6 +28,13 @@ on:
         description: 'Generate and publish vendor tree to GitLab'
         type: boolean
         default: false
+      VENDOR_MISSING_BLOBS_POLICY:
+        description: 'Auto-generated blob entries missing from the actual dump: skip and report, or fail strict'
+        type: choice
+        options:
+          - skip
+          - strict
+        default: skip
       UPLOAD_LINEAGE_DT:
         description: 'Generate and publish LineageOS device tree to GitLab'
         type: boolean
@@ -92,6 +99,7 @@ jobs:
       SEPOLICY_MODE: ${{ inputs.SEPOLICY_MODE }}
       SEPOLICY_BRANCH: ${{ inputs.SEPOLICY_BRANCH }}
       GENERATE_VENDOR: ${{ inputs.GENERATE_VENDOR }}
+      VENDOR_MISSING_BLOBS_POLICY: ${{ inputs.VENDOR_MISSING_BLOBS_POLICY }}
       UPLOAD_LINEAGE_DT: ${{ inputs.UPLOAD_LINEAGE_DT }}
       UPLOAD_TWRP_DT: ${{ inputs.UPLOAD_TWRP_DT }}
       UPLOAD_FULL_DUMP: ${{ inputs.UPLOAD_FULL_DUMP }}
@@ -465,6 +473,172 @@ jobs:
           cd "$tree_dir"
           echo "Vendor extraction: device=$tree_brand/$tree_codename" | tee "$log"
           echo "Proprietary entries: $(grep -cEv '^[[:space:]]*(#|$)' proprietary-files.txt || true)" | tee -a "$log"
+          echo "Checking auto-generated proprietary file paths against firmware..." | tee -a "$log"
+          python3 - "$tree_dir/proprietary-files.txt" "$dump" "$GITHUB_WORKSPACE/vendor-preflight.json" "$VENDOR_MISSING_BLOBS_POLICY" <<'PY_VENDOR_PREFLIGHT'
+          #!/usr/bin/env python3
+          """Validate generated proprietary file list against the extracted firmware.
+
+          Only modifies the generated proprietary-files.txt, never the firmware.
+          """
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          if len(sys.argv) != 5:
+              raise SystemExit('usage: preflight.py LIST DUMP REPORT_JSON skip|strict')
+          list_path, dump_path, report_path = map(Path, sys.argv[1:4])
+          policy = sys.argv[4]
+          if policy not in ('skip', 'strict'):
+              raise SystemExit('::error::VENDOR_MISSING_BLOBS_POLICY must be skip or strict')
+          partitions = ('system', 'system_ext', 'product', 'vendor', 'odm', 'vendor_dlkm', 'odm_dlkm', 'system_dlkm', 'product_dlkm')
+          # These are subdirectories of /system, not independent Android partitions.
+          system_subdirs = {'etc', 'lib', 'lib64', 'bin', 'app', 'priv-app', 'framework', 'usr', 'fonts', 'media', 'xbin', 'overlay'}
+          original = list_path.read_text(encoding='utf-8')
+          backup = list_path.with_name('proprietary-files.generated-original.txt')
+          backup.write_text(original, encoding='utf-8')
+          pattern = re.compile(r'^(-?)([^;:|\s]+)(.*)$')
+
+          def parts(line):
+              stripped = line.strip()
+              if not stripped or stripped.startswith('#'):
+                  return None
+              return pattern.match(stripped)
+
+          def destination(src, extra):
+              dest_match = re.search(r':([^;|]+)', extra)
+              return dest_match.group(1) if dest_match else src
+
+          def is_file(src):
+              return (dump_path / src).is_file()
+
+          original_canonical_destinations = set()
+          for raw in original.splitlines():
+              match = parts(raw)
+              if match:
+                  src = match.group(2)
+                  if is_file(src):
+                      original_canonical_destinations.add(destination(src, match.group(3)))
+
+          entries, new_lines = 0, []
+          repaired, missing, ambiguous, duplicates = [], [], [], []
+          claimed_destinations = set(original_canonical_destinations)
+          for number, raw in enumerate(original.splitlines(keepends=True), 1):
+              match = parts(raw)
+              if not match:
+                  new_lines.append(raw)
+                  continue
+              prefix, src, extra = match.groups()
+              if src.startswith('/') or '\\' in src or '..' in Path(src).parts:
+                  raise SystemExit(f'::error::Suspicious proprietary source at line {number}: {src!r}')
+              entries += 1
+              if is_file(src):
+                  new_lines.append(raw)
+                  continue
+
+              root, sep, suffix = src.partition('/')
+              options = []  # (physical_src, logical_dst)
+              if root in system_subdirs:
+                  for part in partitions:
+                      logical = f'{part}/{src}'
+                      options.extend((candidate, logical) for candidate in (
+                          logical, f'{part}/{part}/{src}'
+                      ) if is_file(candidate))
+              elif root in partitions and sep:
+                  nested = f'{root}/{src}'
+                  if is_file(nested):
+                      options.append((nested, src))
+
+              # The implicit location of unqualified etc/lib64/... paths is /system.
+              # When multiple partitions contain same relative path, prefer /system.
+              # Otherwise relocate only with exactly one resolved location.
+              system_options = [option for option in options if option[1].startswith('system/')]
+              if root in system_subdirs and system_options:
+                  best = system_options[0]
+              elif len(options) == 1:
+                  best = options[0]
+              else:
+                  best = None
+
+              if best:
+                  physical, logical = best
+                  # When the source lives under an extra physical "system/" directory,
+                  # use :logical-path to keep its correct install location in /system.
+                  if ':' in extra:
+                      new_extra = extra
+                  elif physical != logical:
+                      new_extra = ':' + logical + extra
+                  else:
+                      new_extra = extra
+                  target = destination(logical, new_extra)
+                  if target in claimed_destinations:
+                      duplicates.append({'line': number, 'source': src, 'candidate': physical, 'destination': target})
+                      if policy == 'skip':
+                          new_lines.append(f'# GENERATED_BLOB_DUPLICATE: {raw.strip()}\n')
+                      else:
+                          new_lines.append(raw)
+                      continue
+                  claimed_destinations.add(target)
+                  replacement = prefix + physical + new_extra
+                  new_lines.append(raw.replace(raw.strip(), replacement, 1))
+                  repaired.append({'line': number, 'from': src, 'to': physical, 'install_as': target})
+                  continue
+              issue = {'line': number, 'source': src,
+                       'reason': 'ambiguous' if options else 'not_found',
+                       'candidates': [source for source, _ in options]}
+              if options:
+                  ambiguous.append(issue)
+              else:
+                  missing.append(issue)
+              if policy == 'skip':
+                  new_lines.append(f'# GENERATED_BLOB_UNAVAILABLE: {raw.strip()}\n')
+              else:
+                  new_lines.append(raw)
+
+          issues = missing + ambiguous
+          report = {
+              'input': str(list_path), 'dump': str(dump_path), 'policy': policy,
+              'entries': entries, 'repaired': repaired, 'missing': missing,
+              'ambiguous': ambiguous, 'duplicate_entries': duplicates,
+              'skipped_entries': len(issues) + len(duplicates) if policy == 'skip' else 0,
+              'firmware_files_modified': False,
+          }
+          report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          list_path.write_text(''.join(new_lines), encoding='utf-8')
+          print(f'Vendor preflight: {entries} entries; repaired paths {len(repaired)}; '
+                f'unavailable {len(missing)}; ambiguous {len(ambiguous)}; '
+                f'duplicate entries {len(duplicates)}; policy={policy}')
+          for item in repaired[:60]:
+              print(f'REMAP line {item["line"]}: {item["from"]} => {item["to"]} '
+                    f'(install as {item["install_as"]})')
+          for issue in issues[:100]:
+              print(f'UNAVAILABLE line {issue["line"]}: {issue["source"]} ({issue["reason"]}) '
+                    + ','.join(issue['candidates']))
+          for issue in duplicates[:30]:
+              print(f'DUPLICATE line {issue["line"]}: {issue["source"]} => {issue["destination"]}')
+          if policy == 'strict' and (issues or duplicates):
+              raise SystemExit(f'::error::{len(issues)} missing/ambiguous blobs, '
+                               f'{len(duplicates)} duplicates; see vendor-preflight.json')
+          # Large mismatch likely means the dump layout or generator is broken.
+          if policy == 'skip' and entries and len(issues) > max(20, int(entries * 0.02)):
+              raise SystemExit(f'::error::{len(issues)} of {entries} proprietary entries are missing/ambiguous '
+                               '(>2% or >20 files). The dump or generator needs repair.')
+          PY_VENDOR_PREFLIGHT
+          python3 - "$GITHUB_WORKSPACE/vendor-preflight.json" "$GITHUB_STEP_SUMMARY" <<'PY_VENDOR_SUMMARY'
+          import json, sys
+          r=json.load(open(sys.argv[1], encoding="utf-8"))
+          with open(sys.argv[2], "a", encoding="utf-8") as f:
+              f.write("### Vendor extraction preflight\n")
+              f.write(f"- Entries: {r['entries']}; paths repaired: {len(r['repaired'])}; missing: {len(r['missing'])}; ambiguous: {len(r['ambiguous'])}\n")
+              f.write(f"- Missing blob policy: `{r['policy']}` (firmware dump unchanged)\n")
+          PY_VENDOR_SUMMARY
+          python3 - "$GITHUB_WORKSPACE/vendor-preflight.json" <<'PY_VENDOR_WARN'
+          import json, sys
+          r=json.load(open(sys.argv[1], encoding="utf-8"))
+          if r["skipped_entries"]:
+              print(f"::warning title=Vendor generator list corrected::{r['skipped_entries']} generated entries do not exist unambiguously in the available firmware; they were commented out in the generated proprietary-files.txt (NOT removed from firmware). Review vendor-preflight.json.")
+          PY_VENDOR_WARN
+          echo "Vendor preflight report: vendor-preflight.json" | tee -a "$log"
           if [[ -f extract-files.py ]]; then
             # LineageOS Python extract-utils may return exit status 0 even if
             # process_modules() reports missing blobs and stops BEFORE writing
@@ -524,7 +698,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vendor-extraction-log-${{ github.run_id }}-${{ github.run_attempt }}
-          path: vendor-extraction.log
+          path: |
+            vendor-extraction.log
+            vendor-preflight.json
+            generated/android/device/**/proprietary-files.generated-original.txt
+            generated/android/device/**/proprietary-files.txt
           if-no-files-found: ignore
           retention-days: 14
 
